@@ -208,6 +208,22 @@
 
     .sub { display: flex; flex-direction: column; gap: 10px; }
     .sub h3 { font-size: 13px; color: var(--blue); letter-spacing: 1px; }
+
+    /* ── accordion ── */
+    .accordion-toggle {
+      display: flex; align-items: center; gap: 10px;
+      cursor: pointer; width: 100%; background: none; border: none; padding: 0;
+      color: var(--ink); font-family: 'DotGothic16', monospace;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .accordion-toggle .acc-arrow {
+      font-size: 11px; color: var(--muted);
+      transition: transform .1s steps(3);
+      flex-shrink: 0;
+    }
+    .accordion-toggle[aria-expanded="true"] .acc-arrow { transform: rotate(90deg); }
+    .accordion-body { display: none; flex-direction: column; gap: 12px; }
+    .accordion-body.open { display: flex; }
     .divider { border: none; border-top: var(--px) dashed var(--line); margin: 2px 0; }
 
     footer { font-size: 10px; color: var(--line); text-align: center; padding-top: 4px; }
@@ -238,18 +254,23 @@
 
     <!-- ENTRY B — Convert a voice bank -->
     <div class="card" id="stepConvert">
-      <div class="card-head"><span class="badge">変換</span><h2>音源から作る</h2></div>
-      <div class="field">
-        <label class="lbl">UTAU 音源フォルダ</label>
-        <input type="file" id="voiceFiles" multiple webkitdirectory />
-        <p class="hint" style="margin-top:6px">フォルダを選んで変換するだけ。録音ピッチは frq から自動取得し、.koe を生成して自動で読み込みます。</p>
+      <button class="accordion-toggle" id="convertToggle" aria-expanded="false" aria-controls="convertBody">
+        <span class="badge">変換</span><h2>音源から作る</h2>
+        <span class="acc-arrow" style="margin-left:auto">▶</span>
+      </button>
+      <div class="accordion-body" id="convertBody">
+        <div class="field">
+          <label class="lbl">UTAU 音源フォルダ</label>
+          <input type="file" id="voiceFiles" multiple webkitdirectory />
+          <p class="hint" style="margin-top:6px">フォルダを選んで変換するだけ。録音ピッチは frq から自動取得し、.koe を生成して自動で読み込みます。</p>
+        </div>
+        <div class="btn-row">
+          <button class="btn" id="convertBtn" disabled>変換</button>
+          <button class="btn green" id="downloadBtn" style="display:none">.koe 保存</button>
+        </div>
+        <div class="progress"><div class="progress-bar" id="convertProgress"></div></div>
+        <div class="log" id="convertLog">音源フォルダを選択してください。</div>
       </div>
-      <div class="btn-row">
-        <button class="btn" id="convertBtn" disabled>変換</button>
-        <button class="btn green" id="downloadBtn" style="display:none">.koe 保存</button>
-      </div>
-      <div class="progress"><div class="progress-bar" id="convertProgress"></div></div>
-      <div class="log" id="convertLog">音源フォルダを選択してください。</div>
     </div>
 
     <div class="arrow">▼</div>
@@ -347,6 +368,14 @@
 
     // ── utils ──
     const $ = id => document.getElementById(id);
+
+    // ── accordion ──
+    const convertToggle = $('convertToggle');
+    const convertBody = $('convertBody');
+    convertToggle.addEventListener('click', () => {
+      const open = convertBody.classList.toggle('open');
+      convertToggle.setAttribute('aria-expanded', open);
+    });
     const appendLog = (el, msg) => { el.textContent += msg + '\n'; el.scrollTop = el.scrollHeight; el.style.display = 'block'; };
     const setLog = (el, msg) => { el.textContent = msg; el.style.display = 'block'; };
     const setProgress = (el, p) => { el.style.width = (Math.max(0, Math.min(1, p)) * 100).toFixed(1) + '%'; };

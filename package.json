@@ -1,0 +1,48 @@
+{
+  "author": "onjmin",
+  "license": "MIT",
+  "name": "@onjmin/koe",
+  "version": "1.0.0",
+  "description": "UTAU concatenative synthesis engine optimized for browser / mobile via WebAssembly + AudioWorklet",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "bin": {
+    "koe-convert": "./dist/koe-convert.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx src/dev-server.ts",
+    "watch": "tsup --watch",
+    "convert": "tsx src/converter/cli.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src",
+    "clean": "rimraf dist"
+  },
+  "keywords": ["utau", "singing-synthesis", "audioworklet", "wasm"],
+  "packageManager": "pnpm@10.17.1",
+  "devDependencies": {
+    "@biomejs/biome": "2.5.0",
+    "@hono/node-server": "2.0.5",
+    "@types/node": "^22.0.0",
+    "hono": "4.12.25",
+    "rimraf": "6.1.3",
+    "tsup": "8.5.1",
+    "tsx": "4.22.4",
+    "typescript": "6.0.3"
+  },
+  "volta": {
+    "node": "24.16.0",
+    "pnpm": "11.7.0"
+  }
+}

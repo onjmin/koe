@@ -34,9 +34,11 @@ export function parseOto(content: string): OtoEntry[] {
     if (parts.length < 6) continue;
 
     const [alias, offsetStr, consonantStr, cutoffStr, preStr, overlapStr] = parts;
+    // Empty alias → use filename without extension (UTAU spec default)
+    const aliasStr = alias.trim() || wav.replace(/\.[^.]+$/, '');
     const entry: OtoEntry = {
       wav,
-      alias: alias.trim(),
+      alias: aliasStr,
       offset: parseFloat(offsetStr) || 0,
       consonant: parseFloat(consonantStr) || 0,
       cutoff: parseFloat(cutoffStr) || 0,

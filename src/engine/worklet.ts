@@ -187,6 +187,11 @@ class KoeProcessor extends AudioWorkletProcessor {
 
       let sample = this.readSample(cur.data, cur.readPos);
 
+      // Tail fade-out when this is the last active note — prevents clicks on single phonemes.
+      if (!this.next && this.queue.length === 0 && cur.remaining <= MIN_CROSSFADE && cur.length > 0) {
+        sample *= cur.remaining / MIN_CROSSFADE;
+      }
+
       // Lead-in / crossfade: the next note's preutterance aligns to the beat
       // boundary (cur.remaining == 0). So we start the next note `pre` samples
       // early, overlapping the tail of the current note. The first `overlap`

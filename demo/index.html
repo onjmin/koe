@@ -861,92 +861,158 @@
         const WL = await loadWorldline();
         await engine.resume();
         const audioCtx = engine.audioContext;
+        const FS = 48000;
+        const MIN_XF_MS   = 5;   // crossfade minimum (ms)
+        const TAIL_FADE_MS = 10; // free-end click-prevention fade (ms)
+        const LOOKAHEAD_S  = 0.2;
 
         const resolveAlias = buildResolver(currentManifest);
         const speed = Number(speedSlider.value) || 1;
-        const FS = 48000;
 
-        // Build flat note list (phoneme=null for rests)
+        // Equal-power crossfade curves (sin/cos pair).
+        function makeXfCurves(nSamples) {
+          nSamples = Math.max(2, nSamples);
+          const fadeIn  = new Float32Array(nSamples);
+          const fadeOut = new Float32Array(nSamples);
+          for (let k = 0; k < nSamples; k++) {
+            const t = k / (nSamples - 1);
+            fadeIn[k]  = Math.sin(Math.PI / 2 * t);
+            fadeOut[k] = Math.cos(Math.PI / 2 * t);
+          }
+          return { fadeIn, fadeOut };
+        }
+
+        // Schedule a fade-out curve on a GainNode, guarding against:
+        //   - past-time scheduling (fadeOutStart <= now)
+        //   - overlap with a prior curve that ends at fadeInEnd
+        function scheduleFadeOut(gainNode, fadeOutStart, xfMs, fadeInEnd) {
+          const now = audioCtx.currentTime;
+          // Clamp start to after the fade-in ends and after now+epsilon
+          const safeStart = Math.max(fadeOutStart, fadeInEnd + 0.001, now + 0.005);
+          const { fadeOut } = makeXfCurves(Math.max(2, Math.round(xfMs / 1000 * FS)));
+          try {
+            gainNode.gain.setValueCurveAtTime(fadeOut, safeStart, xfMs / 1000);
+          } catch (_) {
+            // Fallback: plain linear ramp if curve still conflicts
+            gainNode.gain.linearRampToValueAtTime(0.0, safeStart + xfMs / 1000);
+          }
+        }
+
+        // Per-note state carried across iterations for the deferred fade-out pattern.
+        // prevGain: GainNode of the previous voiced note (null if chain broken)
+        // prevFadeInEnd: AC time when prevGain's fade-in curve ends
+        // prevEndAcT: AC time when prevGain's audio buffer ends
+        let prevGain = null, prevFadeInEnd = 0, prevEndAcT = 0;
+        let isFreeHead = true; // next voiced note starts a new chain
+
+        // Flush: apply tail fade-out to the current prevGain and break the chain.
+        function flushPrev() {
+          if (!prevGain) return;
+          const now = audioCtx.currentTime;
+          const fadeMs = TAIL_FADE_MS;
+          const fadeOutStart = prevEndAcT - fadeMs / 1000;
+          if (fadeOutStart > prevFadeInEnd + 0.001 && fadeOutStart > now + 0.005) {
+            scheduleFadeOut(prevGain, fadeOutStart, fadeMs, prevFadeInEnd);
+          }
+          prevGain = null;
+          isFreeHead = true;
+        }
+
+        // ── Streaming synthesis + immediate scheduling ──
         let tempo = loadedSong.tempo, prevVowel = '-';
-        const noteList = []; // {phoneme|null, pitch, durMs}
+        let beatAt = audioCtx.currentTime + LOOKAHEAD_S; // AC time of the upcoming beat
+        let done = 0;
+        const totalNotes = loadedSong.notes.filter(n => {
+          const isRest = !n.lyric || /^[rR]$/.test(n.lyric);
+          return !isRest;
+        }).length;
+        setLog(worldStatus, `合成しながら再生中… 0 / ${totalNotes}`);
 
         for (const n of loadedSong.notes) {
+          if (wlAbort) break;
           if (n.tempo) tempo = n.tempo;
           const durMs = (n.lengthTicks / TICKS_PER_BEAT) * (60000 / tempo) / speed;
           const isRest = !n.lyric || /^[rR]$/.test(n.lyric);
+
           if (isRest) {
+            flushPrev(); // chain broken by rest
             prevVowel = '-';
-            noteList.push({ phoneme: null, pitch: 0, durMs: Math.min(durMs, REST_CAP_MS) });
+            beatAt += Math.min(durMs, REST_CAP_MS) / 1000;
             continue;
           }
+
           const alias = resolveAlias(n.lyric, prevVowel, n.noteNum);
           prevVowel = vowelOf(n.lyric);
-          noteList.push({ phoneme: alias, pitch: midiToHz(n.noteNum), durMs });
-        }
 
-        const totalNotes = noteList.filter(n => n.phoneme).length;
-        let done = 0;
-        setLog(worldStatus, `合成しながら再生中… 0 / ${totalNotes}`);
-
-        // beatAt: AudioContext time of the next note's beat position
-        const LOOKAHEAD_S = 0.2;
-        let beatAt = audioCtx.currentTime + LOOKAHEAD_S;
-
-        for (let i = 0; i < noteList.length; i++) {
-          if (wlAbort) break;
-          const { phoneme, pitch, durMs } = noteList[i];
-
-          if (!phoneme) {
+          if (!alias) {
+            // unresolved lyric — treat as rest for chain purposes
+            flushPrev();
             beatAt += durMs / 1000;
             continue;
           }
 
-          const entry = currentManifest.phonemes[phoneme];
+          const entry = currentManifest.phonemes[alias];
           const preMs = entry ? (entry.pre     || 0) / FS * 1000 : 0;
           const olMs  = entry ? (entry.overlap || 0) / FS * 1000 : 0;
 
-          // Overlap of next voiced note (for fade-out timing)
-          let nextOlMs = 0;
-          for (let j = i + 1; j < noteList.length; j++) {
-            if (noteList[j].phoneme) {
-              const ne = currentManifest.phonemes[noteList[j].phoneme];
-              nextOlMs = ne ? (ne.overlap || 0) / FS * 1000 : 0;
-              break;
-            }
-          }
-
-          const audio = await worldlineNote1(WL, phoneme, pitch, durMs, loadedSong.tempo, currentManifest);
+          const audio = await worldlineNote1(WL, alias, midiToHz(n.noteNum), durMs, loadedSong.tempo, currentManifest);
           if (wlAbort) break;
 
-          if (audio && audio.length > 0) {
-            const startAt = Math.max(beatAt - preMs / 1000, audioCtx.currentTime + 0.005);
-            const endAt   = startAt + audio.length / FS;
-
-            const ab  = audioCtx.createBuffer(1, audio.length, FS);
-            ab.getChannelData(0).set(audio);
-            const src  = audioCtx.createBufferSource();
-            src.buffer = ab;
-
-            const gain = audioCtx.createGain();
-            // Fade in over this note's overlap (removes double-vowel from 連続音)
-            gain.gain.setValueAtTime(i === 0 ? 1.0 : 0.0, startAt);
-            if (i > 0 && olMs > 1) {
-              gain.gain.linearRampToValueAtTime(1.0, startAt + olMs / 1000);
-            }
-            // Fade out over next note's overlap (blend into next note's fade-in)
-            if (nextOlMs > 1) {
-              const fadeOutStart = endAt - nextOlMs / 1000;
-              if (fadeOutStart > startAt + olMs / 1000) {
-                gain.gain.setValueAtTime(1.0, fadeOutStart);
-              }
-              gain.gain.linearRampToValueAtTime(0.0, endAt);
-            }
-
-            src.connect(gain);
-            gain.connect(audioCtx.destination);
-            src.start(startAt);
-            wlSources.push(src);
+          // Null / too-short audio: skip but break chain
+          if (!audio || audio.length === 0) {
+            flushPrev();
+            beatAt += durMs / 1000;
+            continue;
           }
+
+          const startAcT  = Math.max(beatAt - preMs / 1000, audioCtx.currentTime + 0.005);
+          const audioDurS = audio.length / FS;
+          const endAcT    = startAcT + audioDurS;
+
+          const ab  = audioCtx.createBuffer(1, audio.length, FS);
+          ab.getChannelData(0).set(audio);
+          const src  = audioCtx.createBufferSource();
+          src.buffer = ab;
+          const gain = audioCtx.createGain();
+          src.connect(gain);
+          gain.connect(audioCtx.destination);
+
+          // ── Fade-in for this note ──
+          let fadeInEndAcT;
+          if (isFreeHead) {
+            const fadeMs = Math.min(TAIL_FADE_MS, preMs > 0 ? preMs : TAIL_FADE_MS);
+            const { fadeIn } = makeXfCurves(Math.max(2, Math.round(fadeMs / 1000 * FS)));
+            gain.gain.setValueAtTime(0.0, startAcT);
+            gain.gain.setValueCurveAtTime(fadeIn, startAcT, fadeMs / 1000);
+            fadeInEndAcT = startAcT + fadeMs / 1000;
+          } else {
+            const xfMs = Math.max(olMs, MIN_XF_MS);
+            const { fadeIn } = makeXfCurves(Math.max(2, Math.round(xfMs / 1000 * FS)));
+            gain.gain.setValueAtTime(0.0, startAcT);
+            gain.gain.setValueCurveAtTime(fadeIn, startAcT, xfMs / 1000);
+            fadeInEndAcT = startAcT + xfMs / 1000;
+          }
+
+          // ── Deferred fade-out: apply it to the PREVIOUS note now that we know startAcT ──
+          if (prevGain) {
+            const xfMs = Math.max(olMs, MIN_XF_MS); // use THIS note's overlap (shared window)
+            if (startAcT < prevEndAcT) {
+              // There is overlap — schedule fade-out on prev anchored at startAcT
+              scheduleFadeOut(prevGain, startAcT, xfMs, prevFadeInEnd);
+            } else {
+              // Gap between notes — tail-fade prev instead
+              scheduleFadeOut(prevGain, prevEndAcT - TAIL_FADE_MS / 1000, TAIL_FADE_MS, prevFadeInEnd);
+            }
+          }
+
+          src.start(startAcT);
+          wlSources.push(src);
+
+          // Hand off state for next iteration
+          prevGain      = gain;
+          prevFadeInEnd = fadeInEndAcT;
+          prevEndAcT    = endAcT;
+          isFreeHead    = false;
 
           beatAt += durMs / 1000;
           done++;
@@ -954,6 +1020,9 @@
           setLog(worldStatus, `合成しながら再生中… ${done} / ${totalNotes}`);
           await new Promise(r => setTimeout(r, 0));
         }
+
+        // ── Flush the final note ──
+        flushPrev();
 
         if (!wlAbort) setLog(worldStatus, `✓ ${totalNotes} notes 完了`);
       } catch (err) {

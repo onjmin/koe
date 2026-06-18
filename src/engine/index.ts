@@ -157,4 +157,18 @@ export class KoeEngine {
   async resume(): Promise<void> {
     if (this.ctx.state === 'suspended') await this.ctx.resume();
   }
+
+  /**
+   * Read a phoneme's raw PCM and return it as a Float64Array normalised to [-1, 1].
+   * Intended for external analysis such as WORLD vocoder.
+   */
+  async getPcm(phoneme: string): Promise<Float64Array | null> {
+    const entry = this._manifest?.phonemes[phoneme];
+    if (!entry || !this.source) return null;
+    const buf = await this.source.readBytes(entry.offset, entry.length * 2);
+    const int16 = new Int16Array(buf);
+    const f64 = new Float64Array(int16.length);
+    for (let i = 0; i < int16.length; i++) f64[i] = int16[i] / 32768;
+    return f64;
+  }
 }

@@ -292,6 +292,17 @@
       </div>
 
       <hr class="divider" />
+
+      <!-- worldline synthesis -->
+      <div class="sub">
+        <h3>③ worldline合成 (UST)</h3>
+        <p class="hint">② と同じ UST を OpenUtau の worldline WASM でオフライン合成します。まず ② で UST を読み込んでください。</p>
+        <button class="btn blue" id="worldPlayBtn" disabled>♪ worldline で歌う</button>
+        <div class="progress"><div class="progress-bar" id="worldProgress"></div></div>
+        <div class="log" id="worldStatus" style="display:none"></div>
+      </div>
+
+      <hr class="divider" />
       <button class="btn ghost" id="stopBtn">■ 停止</button>
     </div>
 
@@ -488,12 +499,18 @@
     speedSlider.addEventListener('input', () => {
       $('speedVal').textContent = '×' + Number(speedSlider.value).toFixed(2);
     });
-    $('stopBtn').addEventListener('click', () => engine?.stop());
+    $('stopBtn').addEventListener('click', () => {
+      engine?.stop();
+      wlAbort = true;
+      wlSources.forEach(s => { try { s.stop(); } catch {} });
+      wlSources = [];
+    });
 
     function setupPlayback(names) {
       allNames = names;
       populateSelect(names);
       if (loadedSong) $('playSongBtn').disabled = false;
+      updateWorldBtn();
     }
 
     // ── ① single sound ──
@@ -620,6 +637,7 @@
         const real = loadedSong.notes.filter(n => n.lyric && !/^[rR]$/.test(n.lyric)).length;
         setLog(songStatus, `✓ ${loadedSong.projectName || file.name} — ${real} notes / ${loadedSong.tempo} BPM`);
         playSongBtn.disabled = !engine;
+        updateWorldBtn();
       } catch (err) {
         setLog(songStatus, `✗ UST parse failed: ${err.message}`);
         console.error(err);
@@ -664,6 +682,256 @@
       } catch (err) {
         console.error('[koe] song failed:', err);
         appendLog(songStatus, `✗ ${err.message}`);
+      }
+    });
+
+    // ── ③ worldline synthesis (UST) ──
+    const worldPlayBtn = $('worldPlayBtn');
+    const worldStatus = $('worldStatus');
+    const worldProgressEl = $('worldProgress');
+
+    let wlModule = null;
+    let wlLoadPromise = null;
+
+    function loadWorldline() {
+      if (wlModule) return Promise.resolve(wlModule);
+      if (wlLoadPromise) return wlLoadPromise;
+      wlLoadPromise = new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = './world/worldline.js';
+        s.onload = () => {
+          WorldlineModule({ locateFile: f => `./world/${f}` })
+            .then(m => { wlModule = m; resolve(m); })
+            .catch(reject);
+        };
+        s.onerror = () => reject(new Error('worldline.js の読み込みに失敗'));
+        document.head.appendChild(s);
+      });
+      return wlLoadPromise;
+    }
+
+    // SynthRequest layout (120 bytes, WASM32)
+    const SYNTH_REQ_SIZE = 120;
+    // frame period hardcoded in worldline phrase_synth.cpp
+    const WL_FRAME_MS = 10;
+
+    // WORLD needs at least ~85ms of audio for stable F0 analysis
+    const MIN_WORLD_SAMPLES = 4096;
+
+    // Synthesize a single note via PhraseSynth and return raw Float32 audio.
+    // posMs = preMs so the output begins at the preutterance (before the beat).
+    // No internal crossfade — caller applies GainNode fade-in/out externally.
+    async function worldlineNote1(WL, phoneme, pitch, durMs, baseTempo, manifest) {
+      const FS = 48000;
+      const entry = manifest.phonemes[phoneme];
+      if (!entry) return null;
+
+      const pcmF64 = await engine.getPcm(phoneme);
+      if (!pcmF64 || pcmF64.length < MIN_WORLD_SAMPLES) return null;
+
+      const preMs = (entry.pre      || 0) / FS * 1000;
+      const conMs = (entry.consonant || 0) / FS * 1000;
+      const midiNote = Math.round(69 + 12 * Math.log2(pitch / 440));
+      const posMs    = preMs; // beat at preMs within the output buffer
+
+      const ps = WL._PhraseSynthNew();
+      if (!ps) return null;
+      const reqPtr = WL._malloc(SYNTH_REQ_SIZE);
+      if (!reqPtr) { WL._PhraseSynthDelete(ps); return null; }
+      const samplePtr = WL._malloc(pcmF64.length * 8);
+      if (!samplePtr) { WL._free(reqPtr); WL._PhraseSynthDelete(ps); return null; }
+      WL.HEAPF64.set(pcmF64, samplePtr >> 3);
+
+      const sv = (off, val, type) => WL.setValue(reqPtr + off, val, type);
+      sv(0,   FS,            'i32');
+      sv(4,   pcmF64.length, 'i32');
+      sv(8,   samplePtr,     '*');
+      sv(12,  0,             'i32');
+      sv(16,  0,             '*');
+      sv(20,  midiNote,      'i32');
+      sv(24,  100.0,         'double');
+      sv(32,  0.0,           'double');
+      sv(40,  durMs,         'double');
+      sv(48,  conMs,         'double');
+      sv(56,  0.0,           'double');
+      sv(64,  100.0,         'double');
+      sv(72,  0.0,           'double');
+      sv(80,  baseTempo,     'double');
+      sv(88,  0,             'i32');
+      sv(92,  0,             '*');
+      sv(96,  0,             'i32');
+      sv(100, 0,             'i32');
+      sv(104, 100,           'i32');
+      sv(108, 0,             'i32');
+      sv(112, 0,             'i32');
+      sv(116, 100,           'i32');
+
+      // skip/fadeIn/fadeOut all 0 — crossfade is handled externally via GainNode
+      WL._PhraseSynthAddRequest(ps, reqPtr, posMs, 0.0, durMs, 0.0, 0.0, midiNote);
+      WL._free(samplePtr);
+      WL._free(reqPtr);
+
+      const totalMs = preMs + durMs + WL_FRAME_MS * 2;
+      const nFrames = Math.ceil(totalMs / WL_FRAME_MS) + 2;
+      const f0Arr = new Float64Array(nFrames).fill(pitch);
+      const gArr  = new Float64Array(nFrames).fill(0.5);
+      const tArr  = new Float64Array(nFrames).fill(0.5);
+      const bArr  = new Float64Array(nFrames).fill(0.5);
+      const vArr  = new Float64Array(nFrames).fill(1.0);
+
+      const f0Ptr = WL._malloc(nFrames * 8);
+      const gPtr  = WL._malloc(nFrames * 8);
+      const tPtr  = WL._malloc(nFrames * 8);
+      const bPtr  = WL._malloc(nFrames * 8);
+      const vPtr  = WL._malloc(nFrames * 8);
+      if (!f0Ptr || !gPtr || !tPtr || !bPtr || !vPtr) {
+        if (f0Ptr) WL._free(f0Ptr); if (gPtr) WL._free(gPtr);
+        if (tPtr)  WL._free(tPtr);  if (bPtr) WL._free(bPtr);
+        if (vPtr)  WL._free(vPtr);
+        WL._PhraseSynthDelete(ps); return null;
+      }
+      WL.HEAPF64.set(f0Arr, f0Ptr >> 3);
+      WL.HEAPF64.set(gArr,  gPtr  >> 3);
+      WL.HEAPF64.set(tArr,  tPtr  >> 3);
+      WL.HEAPF64.set(bArr,  bPtr  >> 3);
+      WL.HEAPF64.set(vArr,  vPtr  >> 3);
+      WL._PhraseSynthSetCurves(ps, f0Ptr, gPtr, tPtr, bPtr, vPtr, nFrames, WL_FRAME_MS);
+      WL._free(f0Ptr); WL._free(gPtr); WL._free(tPtr); WL._free(bPtr); WL._free(vPtr);
+
+      const yPtrPtr = WL._malloc(4);
+      if (!yPtrPtr) { WL._PhraseSynthDelete(ps); return null; }
+      const outLen = WL._PhraseSynthSynth(ps, yPtrPtr, 0);
+      const yPtr   = WL.getValue(yPtrPtr, '*');
+      const audio  = outLen > 0
+        ? new Float32Array(WL.HEAPF32.buffer, yPtr, outLen).slice()
+        : null;
+      WL._free(yPtrPtr);
+      WL._PhraseSynthDelete(ps);
+      return audio;
+    }
+
+    let wlAbort = false;
+    let wlSources = [];
+
+    function updateWorldBtn() {
+      worldPlayBtn.disabled = !engine || !loadedSong;
+    }
+
+    worldPlayBtn.addEventListener('click', async () => {
+      if (!engine || !loadedSong || !currentManifest) return;
+      wlAbort = true;
+      wlSources.forEach(s => { try { s.stop(); } catch {} });
+      wlSources = [];
+      wlAbort = false;
+
+      worldPlayBtn.disabled = true;
+      setProgress(worldProgressEl, 0);
+      setLog(worldStatus, 'worldline 読み込み中…');
+
+      try {
+        const WL = await loadWorldline();
+        await engine.resume();
+        const audioCtx = engine.audioContext;
+
+        const resolveAlias = buildResolver(currentManifest);
+        const speed = Number(speedSlider.value) || 1;
+        const FS = 48000;
+
+        // Build flat note list (phoneme=null for rests)
+        let tempo = loadedSong.tempo, prevVowel = '-';
+        const noteList = []; // {phoneme|null, pitch, durMs}
+
+        for (const n of loadedSong.notes) {
+          if (n.tempo) tempo = n.tempo;
+          const durMs = (n.lengthTicks / TICKS_PER_BEAT) * (60000 / tempo) / speed;
+          const isRest = !n.lyric || /^[rR]$/.test(n.lyric);
+          if (isRest) {
+            prevVowel = '-';
+            noteList.push({ phoneme: null, pitch: 0, durMs: Math.min(durMs, REST_CAP_MS) });
+            continue;
+          }
+          const alias = resolveAlias(n.lyric, prevVowel, n.noteNum);
+          prevVowel = vowelOf(n.lyric);
+          noteList.push({ phoneme: alias, pitch: midiToHz(n.noteNum), durMs });
+        }
+
+        const totalNotes = noteList.filter(n => n.phoneme).length;
+        let done = 0;
+        setLog(worldStatus, `合成しながら再生中… 0 / ${totalNotes}`);
+
+        // beatAt: AudioContext time of the next note's beat position
+        const LOOKAHEAD_S = 0.2;
+        let beatAt = audioCtx.currentTime + LOOKAHEAD_S;
+
+        for (let i = 0; i < noteList.length; i++) {
+          if (wlAbort) break;
+          const { phoneme, pitch, durMs } = noteList[i];
+
+          if (!phoneme) {
+            beatAt += durMs / 1000;
+            continue;
+          }
+
+          const entry = currentManifest.phonemes[phoneme];
+          const preMs = entry ? (entry.pre     || 0) / FS * 1000 : 0;
+          const olMs  = entry ? (entry.overlap || 0) / FS * 1000 : 0;
+
+          // Overlap of next voiced note (for fade-out timing)
+          let nextOlMs = 0;
+          for (let j = i + 1; j < noteList.length; j++) {
+            if (noteList[j].phoneme) {
+              const ne = currentManifest.phonemes[noteList[j].phoneme];
+              nextOlMs = ne ? (ne.overlap || 0) / FS * 1000 : 0;
+              break;
+            }
+          }
+
+          const audio = await worldlineNote1(WL, phoneme, pitch, durMs, loadedSong.tempo, currentManifest);
+          if (wlAbort) break;
+
+          if (audio && audio.length > 0) {
+            const startAt = Math.max(beatAt - preMs / 1000, audioCtx.currentTime + 0.005);
+            const endAt   = startAt + audio.length / FS;
+
+            const ab  = audioCtx.createBuffer(1, audio.length, FS);
+            ab.getChannelData(0).set(audio);
+            const src  = audioCtx.createBufferSource();
+            src.buffer = ab;
+
+            const gain = audioCtx.createGain();
+            // Fade in over this note's overlap (removes double-vowel from 連続音)
+            gain.gain.setValueAtTime(i === 0 ? 1.0 : 0.0, startAt);
+            if (i > 0 && olMs > 1) {
+              gain.gain.linearRampToValueAtTime(1.0, startAt + olMs / 1000);
+            }
+            // Fade out over next note's overlap (blend into next note's fade-in)
+            if (nextOlMs > 1) {
+              const fadeOutStart = endAt - nextOlMs / 1000;
+              if (fadeOutStart > startAt + olMs / 1000) {
+                gain.gain.setValueAtTime(1.0, fadeOutStart);
+              }
+              gain.gain.linearRampToValueAtTime(0.0, endAt);
+            }
+
+            src.connect(gain);
+            gain.connect(audioCtx.destination);
+            src.start(startAt);
+            wlSources.push(src);
+          }
+
+          beatAt += durMs / 1000;
+          done++;
+          setProgress(worldProgressEl, done / totalNotes);
+          setLog(worldStatus, `合成しながら再生中… ${done} / ${totalNotes}`);
+          await new Promise(r => setTimeout(r, 0));
+        }
+
+        if (!wlAbort) setLog(worldStatus, `✓ ${totalNotes} notes 完了`);
+      } catch (err) {
+        setLog(worldStatus, `✗ ${err.message}`);
+        console.error('[worldline]', err);
+      } finally {
+        worldPlayBtn.disabled = false;
       }
     });
 

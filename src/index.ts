@@ -2,6 +2,13 @@
 export { KoeEngine } from './engine/index.js';
 export type { KoeEngineOptions, NoteEvent } from './engine/index.js';
 
+// Voice bank — DOM/AudioContext-free PCM access (manifest + getPcm)
+export { VoiceBank } from './engine/voice-bank.js';
+
+// worldline — WORLD-vocoder note renderer (WASM)
+export { Worldline, leadInFromEntry, samplesToMs, WORLDLINE_SAMPLE_RATE, MIN_WORLDLINE_SAMPLES } from './engine/worldline.js';
+export type { WorldlineLoadOptions, RenderNoteParams } from './engine/worldline.js';
+
 // Converter utilities (browser + Node.js)
 export { parseOto } from './converter/parse-oto.js';
 export type { OtoEntry } from './converter/parse-oto.js';

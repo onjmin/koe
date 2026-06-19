@@ -297,19 +297,25 @@
 
       <hr class="divider" />
 
-      <!-- melody -->
+      <!-- UST load + shared params -->
       <div class="sub">
-        <h3>② メロディ (UST)</h3>
+        <h3>② UST 読み込み</h3>
         <div class="field">
           <label class="lbl">UST ファイル</label>
           <input type="file" id="ustFile" accept=".ust" />
         </div>
         <div class="row">
+          <label class="lbl">相対ピッチ</label>
+          <input type="range" id="relPitchSlider" class="grow" min="-12" max="12" value="0" step="1" />
+          <span id="relPitchVal" class="slval">0 st</span>
+        </div>
+        <p class="hint">UST全体を移調します。モデルごとに得意な音域が違うので、③ に適用されます。</p>
+        <div class="row">
           <label class="lbl">スピード</label>
           <input type="range" id="speedSlider" class="grow" min="0.5" max="2" value="1" step="0.05" />
           <span id="speedVal" class="slval">×1.00</span>
         </div>
-        <button class="btn" id="playSongBtn" disabled>♪ 再生</button>
+        <p class="hint">UST を読み込むと ③ で worldline 合成できます。</p>
         <div class="log" id="songStatus" style="display:none"></div>
       </div>
 
@@ -322,21 +328,6 @@
         <button class="btn blue" id="worldPlayBtn" disabled>♪ worldline で歌う</button>
         <div class="progress"><div class="progress-bar" id="worldProgress"></div></div>
         <div class="log" id="worldStatus" style="display:none"></div>
-      </div>
-
-      <hr class="divider" />
-
-      <!-- Phase-Vocoder synthesis -->
-      <div class="sub">
-        <h3>④ Phase-Vocoder（リアルタイムピッチ）</h3>
-        <p class="hint">② と同じ UST を Phase-Vocoder で直接合成します。WORLD 解析不要。スライダーで再生中にピッチをリアルタイム変更できます。</p>
-        <div class="row">
-          <label class="lbl" style="min-width:74px">ピッチシフト</label>
-          <input type="range" id="pvPitchSlider" class="grow" min="-24" max="24" value="0" step="0.5" />
-          <span id="pvPitchVal" class="slval">± 0.0 st</span>
-        </div>
-        <button class="btn" id="pvPlayBtn" disabled>♪ PV で歌う</button>
-        <div class="log" id="pvStatus" style="display:none"></div>
       </div>
 
       <hr class="divider" />
@@ -371,7 +362,7 @@
     import {
       parseOto, normalizePcm, trimToOto,
       parseFrqAverageF0, frqFileName, pitchFromAliasSuffix,
-      packKoe, KoeEngine,
+      packKoe, KoeEngine, Worldline, leadInFromEntry,
     } from './index.js';
 
     // ── state ──
@@ -544,20 +535,25 @@
     speedSlider.addEventListener('input', () => {
       $('speedVal').textContent = '×' + Number(speedSlider.value).toFixed(2);
     });
+    const relPitchSlider = $('relPitchSlider');
+    relPitchSlider.addEventListener('input', () => {
+      const v = Number(relPitchSlider.value);
+      $('relPitchVal').textContent = `${v > 0 ? '+' : ''}${v} st`;
+    });
+    // UST-wide transpose in semitones, applied to ③ (worldline). Lets the user
+    // shift the melody into a range the synth model handles best.
+    const relPitch = () => Number(relPitchSlider.value) || 0;
     $('stopBtn').addEventListener('click', () => {
       engine?.stop();
       wlAbort = true;
       wlSources.forEach(s => { try { s.stop(); } catch {} });
       wlSources = [];
-      pvNode?.port.postMessage({ type: 'stop' });
     });
 
     function setupPlayback(names) {
       allNames = names;
       populateSelect(names);
-      if (loadedSong) $('playSongBtn').disabled = false;
       updateWorldBtn();
-      updatePVBtn();
     }
 
     // ── ① single sound ──
@@ -589,7 +585,6 @@
       wlAbort = true;
       wlSources.forEach(s => { try { s.stop(); } catch {} });
       wlSources = [];
-      pvNode?.port.postMessage({ type: 'stop' });
       const recorded = entry.pitch || currentManifest.referencePitch || 220;
       const stepRate = 2 ** (Number(transposeSlider.value) / 12);
       try {
@@ -677,7 +672,6 @@
     }
 
     const ustFile = $('ustFile');
-    const playSongBtn = $('playSongBtn');
     const songStatus = $('songStatus');
 
     ustFile.addEventListener('change', async () => {
@@ -687,57 +681,10 @@
         loadedSong = parseUST(await file.arrayBuffer());
         const real = loadedSong.notes.filter(n => n.lyric && !/^[rR]$/.test(n.lyric)).length;
         setLog(songStatus, `✓ ${loadedSong.projectName || file.name} — ${real} notes / ${loadedSong.tempo} BPM`);
-        playSongBtn.disabled = !engine;
         updateWorldBtn();
-        updatePVBtn();
       } catch (err) {
         setLog(songStatus, `✗ UST parse failed: ${err.message}`);
         console.error(err);
-      }
-    });
-
-    playSongBtn.addEventListener('click', async () => {
-      if (!engine || !loadedSong || !currentManifest) return;
-      wlAbort = true;
-      wlSources.forEach(s => { try { s.stop(); } catch {} });
-      wlSources = [];
-      pvNode?.port.postMessage({ type: 'stop' });
-      const resolve = buildResolver(currentManifest);
-      const speed = Number(speedSlider.value) || 1;
-      const msToSamp = ms => Math.round((ms / 1000) * 48000);
-
-      let tempo = loadedSong.tempo, prevVowel = '-', started = false;
-      const notes = [], missing = new Set();
-
-      for (const n of loadedSong.notes) {
-        if (n.tempo) tempo = n.tempo;
-        const durMs = (n.lengthTicks / TICKS_PER_BEAT) * (60000 / tempo) / speed;
-        const isRest = !n.lyric || /^[rR]$/.test(n.lyric);
-        if (isRest) {
-          prevVowel = '-';
-          if (!started) continue;
-          notes.push({ phoneme: '', pitch: 0, duration: msToSamp(Math.min(durMs, REST_CAP_MS)) });
-          continue;
-        }
-        started = true;
-        const alias = resolve(n.lyric, prevVowel, n.noteNum);
-        prevVowel = vowelOf(n.lyric);
-        if (!alias) { missing.add(n.lyric); notes.push({ phoneme: '', pitch: 0, duration: msToSamp(durMs) }); continue; }
-        notes.push({ phoneme: alias, pitch: midiToHz(n.noteNum), duration: msToSamp(durMs) });
-      }
-
-      const playable = notes.filter(x => x.phoneme).length;
-      setLog(songStatus, missing.size
-        ? `⚠ 未解決 ${missing.size}種: ${[...missing].slice(0, 12).join(' ')}${missing.size > 12 ? ' …' : ''}  (${playable} notes)`
-        : `✓ ${playable} notes`);
-
-      if (!playable) { appendLog(songStatus, '✗ この音源では歌詞を解決できませんでした。'); return; }
-      try {
-        await engine.resume();
-        await engine.play(notes);
-      } catch (err) {
-        console.error('[koe] song failed:', err);
-        appendLog(songStatus, `✗ ${err.message}`);
       }
     });
 
@@ -746,137 +693,23 @@
     const worldStatus = $('worldStatus');
     const worldProgressEl = $('worldProgress');
 
-    let wlModule = null;
-    let wlLoadPromise = null;
+    // The worldline WASM renderer now lives in the library (@onjmin/koe).
+    // Demo concern = scheduling only; synthesis is `wl.renderNote(...)` below.
+    let wl = null;
 
-    function loadWorldline() {
-      if (wlModule) return Promise.resolve(wlModule);
-      if (wlLoadPromise) return wlLoadPromise;
-      wlLoadPromise = new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = './world/worldline.js';
-        s.onload = () => {
-          WorldlineModule({ locateFile: f => `./world/${f}` })
-            .then(m => { wlModule = m; resolve(m); })
-            .catch(reject);
-        };
-        s.onerror = () => reject(new Error('worldline.js の読み込みに失敗'));
-        document.head.appendChild(s);
-      });
-      return wlLoadPromise;
-    }
-
-    // SynthRequest layout (120 bytes, WASM32)
-    const SYNTH_REQ_SIZE = 120;
-    // frame period hardcoded in worldline phrase_synth.cpp
-    const WL_FRAME_MS = 10;
-
-    // WORLD needs at least ~85ms of audio for stable F0 analysis
-    const MIN_WORLD_SAMPLES = 4096;
-
-    // Synthesize a single note via PhraseSynth and return raw Float32 audio.
-    // The output buffer is [lead-in/consonant ≈ preMs][vowel ≈ durMs]: rendered from
-    // the sample offset (posMs=0, no leading silence) for preMs+durMs. The buffer's
-    // beat (vowel onset / preutterance) sits at offset ≈ preMs, so the caller places
-    // it at startAcT = beat − preMs (consonant before the beat, vowel on the beat).
-    // (The old posMs=preMs / length=durMs rendered leading SILENCE and dropped the
-    //  consonant, mistiming VCV — see git history.)
-    // No internal crossfade — caller applies GainNode fade-in/out externally.
-    async function worldlineNote1(WL, phoneme, pitch, durMs, baseTempo, manifest) {
-      const FS = 48000;
+    // Render one note's PCM via the library renderer. Returns Float32 @48k or null.
+    async function worldlineNote1(phoneme, pitch, durMs, baseTempo, manifest) {
       const entry = manifest.phonemes[phoneme];
       if (!entry) return null;
-
-      const pcmF64 = await engine.getPcm(phoneme);
-      if (!pcmF64 || pcmF64.length < MIN_WORLD_SAMPLES) return null;
-
-      const preMs = (entry.pre      || 0) / FS * 1000;
-      const conMs = (entry.consonant || 0) / FS * 1000;
-      const midiNote = Math.round(69 + 12 * Math.log2(pitch / 440));
-      const posMs    = 0;             // no leading silence
-      const reqLen   = preMs + durMs; // render lead-in/consonant + vowel
-
-      // cut_off must trim at least ~2 frames off the tail. PhraseSynth::AddRequest
-      // computes the trim frame count as ceil(in_length_ms)/frame_ms, but PyinEstimator
-      // yields floor(N/nhop)−1 frames — one fewer. With cut_off=0 the requested frame
-      // count exceeds f0_.size() and Model::Trim's f0_.erase() runs past end(), causing
-      // "memory access out of bounds". Trimming 2 frames keeps it within bounds.
-      const cutMs = WL_FRAME_MS * 2;
-
-      const ps = WL._PhraseSynthNew();
-      if (!ps) return null;
-      const reqPtr = WL._malloc(SYNTH_REQ_SIZE);
-      if (!reqPtr) { WL._PhraseSynthDelete(ps); return null; }
-      const samplePtr = WL._malloc(pcmF64.length * 8);
-      if (!samplePtr) { WL._free(reqPtr); WL._PhraseSynthDelete(ps); return null; }
-      WL.HEAPF64.set(pcmF64, samplePtr >> 3);
-
-      const sv = (off, val, type) => WL.setValue(reqPtr + off, val, type);
-      sv(0,   FS,            'i32');
-      sv(4,   pcmF64.length, 'i32');
-      sv(8,   samplePtr,     '*');
-      sv(12,  0,             'i32');
-      sv(16,  0,             '*');
-      sv(20,  midiNote,      'i32');
-      sv(24,  100.0,         'double');
-      sv(32,  0.0,           'double');
-      sv(40,  reqLen,        'double');
-      sv(48,  conMs,         'double');
-      sv(56,  cutMs,         'double');
-      sv(64,  100.0,         'double');
-      sv(72,  0.0,           'double');
-      sv(80,  baseTempo,     'double');
-      sv(88,  0,             'i32');
-      sv(92,  0,             '*');
-      sv(96,  0,             'i32');
-      sv(100, 0,             'i32');
-      sv(104, 100,           'i32');
-      sv(108, 0,             'i32');
-      sv(112, 0,             'i32');
-      sv(116, 100,           'i32');
-
-      // skip/fadeIn/fadeOut all 0 — crossfade is handled externally via GainNode
-      WL._PhraseSynthAddRequest(ps, reqPtr, posMs, 0.0, reqLen, 0.0, 0.0, 0);
-      WL._free(samplePtr);
-      WL._free(reqPtr);
-
-      const totalMs = posMs + reqLen + WL_FRAME_MS * 2;
-      const nFrames = Math.ceil(totalMs / WL_FRAME_MS) + 4;
-      const f0Arr = new Float64Array(nFrames).fill(pitch);
-      const gArr  = new Float64Array(nFrames).fill(0.5);
-      const tArr  = new Float64Array(nFrames).fill(0.5);
-      const bArr  = new Float64Array(nFrames).fill(0.5);
-      const vArr  = new Float64Array(nFrames).fill(1.0);
-
-      const f0Ptr = WL._malloc(nFrames * 8);
-      const gPtr  = WL._malloc(nFrames * 8);
-      const tPtr  = WL._malloc(nFrames * 8);
-      const bPtr  = WL._malloc(nFrames * 8);
-      const vPtr  = WL._malloc(nFrames * 8);
-      if (!f0Ptr || !gPtr || !tPtr || !bPtr || !vPtr) {
-        if (f0Ptr) WL._free(f0Ptr); if (gPtr) WL._free(gPtr);
-        if (tPtr)  WL._free(tPtr);  if (bPtr) WL._free(bPtr);
-        if (vPtr)  WL._free(vPtr);
-        WL._PhraseSynthDelete(ps); return null;
-      }
-      WL.HEAPF64.set(f0Arr, f0Ptr >> 3);
-      WL.HEAPF64.set(gArr,  gPtr  >> 3);
-      WL.HEAPF64.set(tArr,  tPtr  >> 3);
-      WL.HEAPF64.set(bArr,  bPtr  >> 3);
-      WL.HEAPF64.set(vArr,  vPtr  >> 3);
-      WL._PhraseSynthSetCurves(ps, f0Ptr, gPtr, tPtr, bPtr, vPtr, nFrames, WL_FRAME_MS);
-      WL._free(f0Ptr); WL._free(gPtr); WL._free(tPtr); WL._free(bPtr); WL._free(vPtr);
-
-      const yPtrPtr = WL._malloc(4);
-      if (!yPtrPtr) { WL._PhraseSynthDelete(ps); return null; }
-      const outLen = WL._PhraseSynthSynth(ps, yPtrPtr, 0);
-      const yPtr   = WL.getValue(yPtrPtr, '*');
-      const audio  = outLen > 0
-        ? new Float32Array(WL.HEAPF32.buffer, yPtr, outLen).slice()
-        : null;
-      WL._free(yPtrPtr);
-      WL._PhraseSynthDelete(ps);
-      return audio;
+      const pcm = await engine.getPcm(phoneme);
+      if (!pcm) return null;
+      return wl.renderNote({
+        pcm,
+        pitch,
+        durationMs: durMs,
+        tempo: baseTempo,
+        ...leadInFromEntry(entry),
+      });
     }
 
     let wlAbort = false;
@@ -889,7 +722,6 @@
     worldPlayBtn.addEventListener('click', async () => {
       if (!engine || !loadedSong || !currentManifest) return;
       engine?.stop();
-      pvNode?.port.postMessage({ type: 'stop' });
       wlAbort = true;
       wlSources.forEach(s => { try { s.stop(); } catch {} });
       wlSources = [];
@@ -900,7 +732,7 @@
       setLog(worldStatus, 'worldline 読み込み中…');
 
       try {
-        const WL = await loadWorldline();
+        if (!wl) wl = await Worldline.load({ scriptUrl: './world/worldline.js' });
         await engine.resume();
         const audioCtx = engine.audioContext;
         const FS = 48000;
@@ -990,7 +822,8 @@
             continue;
           }
 
-          const alias = resolveAlias(n.lyric, prevVowel, n.noteNum);
+          const noteNum = n.noteNum + relPitch();
+          const alias = resolveAlias(n.lyric, prevVowel, noteNum);
           prevVowel = vowelOf(n.lyric);
 
           if (!alias) {
@@ -1003,7 +836,7 @@
           const entry = currentManifest.phonemes[alias];
           const preMs = entry ? (entry.pre     || 0) / FS * 1000 : 0;
 
-          const audio = await worldlineNote1(WL, alias, midiToHz(n.noteNum), durMs, loadedSong.tempo, currentManifest);
+          const audio = await worldlineNote1(alias, midiToHz(noteNum), durMs, loadedSong.tempo, currentManifest);
           if (wlAbort) break;
 
           // Null / too-short audio: skip but break chain
@@ -1023,7 +856,9 @@
           let effPre = preMs;
           if (!isFreeHead) effPre = Math.min(effPre, LEADCAP_MS, prevDurMs > 0 ? prevDurMs : effPre);
           const skipS = (preMs - effPre) / 1000;          // trimmed from the buffer head
-          const xfMs  = Math.min(effPre, Math.max(XF_MS, MIN_XF_MS));
+          // Floor at MIN_XF_MS so CV banks with preMs=0 (effPre=0) still get a valid,
+          // non-zero anti-click fade (setValueCurveAtTime needs a positive duration).
+          const xfMs  = Math.max(MIN_XF_MS, Math.min(effPre, XF_MS));
 
           const startAcT  = Math.max(beatAt - effPre / 1000, audioCtx.currentTime + 0.005);
           const playDurS  = audio.length / FS - skipS;     // played length (lead-in trimmed)
@@ -1080,359 +915,6 @@
         console.error('[worldline]', err);
       } finally {
         worldPlayBtn.disabled = false;
-      }
-    });
-
-    // ════════ ④ Phase-Vocoder synthesis ════════
-
-    // ── PV AudioWorklet source (blob URL — no extra file needed) ──
-    // FFT_SIZE=1024, HOP=256 (75% overlap).
-    //
-    // Pitch-shift mechanism:
-    //   • Source position advances pitchRatio × HOP samples per synthesis hop.
-    //   • Standard PV phase unwrap: Δφ_unwrap = ω_k·Ha + princarg(Δφ − ω_k·Ha)
-    //     where Ha = pitchRatio × HOP (source advance) and Hs = HOP (output hop).
-    //   • Simplified to: synthPhase[k] += Δφ_unwrap  (= ω_inst · Hs exactly).
-    //   • Duration is fully preserved — no time stretch side-effect.
-    //
-    // Crossfade / flushPrev:
-    //   • Next note's lead-in (pre samples) plays early, blended over the overlap
-    //     window — identical logic to the existing koe-processor worklet.
-    //   • Tail fade-out on the final note mirrors the flushPrev pattern from the
-    //     worldline demo (applied inline since there is no GainNode chain here).
-    //   • The pitchShift AudioParam is applied per process() call, so the
-    //     crossfade automatically adapts when the slider moves mid-note.
-    const PV_WORKLET_SRC = `
-'use strict';
-
-const FFT_SIZE = 1024;
-const HOP      = FFT_SIZE >> 2;   // 256  —  75 % overlap
-const HALF     = FFT_SIZE >> 1;
-const MIN_XF   = 480;             // ~10 ms at 48 kHz
-const OLA_NORM = 1.5;             // Hann @ 75 % normalisation constant
-
-// Hann window (analysis and synthesis)
-const WIN = new Float32Array(FFT_SIZE);
-for (let i = 0; i < FFT_SIZE; i++)
-  WIN[i] = 0.5 * (1 - Math.cos(2 * Math.PI * i / FFT_SIZE));
-
-// Shared FFT scratch buffers — safe because the worklet is single-threaded.
-const FR = new Float64Array(FFT_SIZE);
-const FI = new Float64Array(FFT_SIZE);
-
-// In-place Cooley-Tukey radix-2 DIT FFT.
-function fft(re, im) {
-  const N = re.length;
-  let j = 0;
-  for (let i = 1; i < N; i++) {
-    let b = N >> 1;
-    while (j & b) { j ^= b; b >>= 1; }
-    j ^= b;
-    if (i < j) {
-      let t = re[i]; re[i] = re[j]; re[j] = t;
-          t = im[i]; im[i] = im[j]; im[j] = t;
-    }
-  }
-  for (let s = 2; s <= N; s <<= 1) {
-    const h = s >> 1;
-    const a = -2 * Math.PI / s;
-    const wr0 = Math.cos(a), wi0 = Math.sin(a);
-    for (let k = 0; k < N; k += s) {
-      let wr = 1, wi = 0;
-      for (let m = 0; m < h; m++) {
-        const ar = re[k+m],          ai = im[k+m];
-        const br = re[k+m+h]*wr - im[k+m+h]*wi;
-        const bi = re[k+m+h]*wi + im[k+m+h]*wr;
-        re[k+m]   = ar+br;  im[k+m]   = ai+bi;
-        re[k+m+h] = ar-br;  im[k+m+h] = ai-bi;
-        const t = wr*wr0 - wi*wi0; wi = wr*wi0 + wi*wr0; wr = t;
-      }
-    }
-  }
-}
-function ifft(re, im) {
-  const N = re.length;
-  for (let i = 0; i < N; i++) im[i] = -im[i];
-  fft(re, im);
-  for (let i = 0; i < N; i++) { re[i] /= N; im[i] = -im[i] / N; }
-}
-// Wrap angle to (−π, π].
-function princarg(p) { return p - 2 * Math.PI * Math.round(p / (2 * Math.PI)); }
-
-// Allocate per-note PV state.
-function makePV(srcStart) {
-  return {
-    srcPos:     srcStart,
-    lastPhase:  new Float64Array(HALF + 1),
-    synthPhase: new Float64Array(HALF + 1),
-    pvOut:      new Float32Array(FFT_SIZE),
-    pvReadPos:  HOP,  // set to HOP so first pvRead triggers the first frame
-  };
-}
-
-// Run one PV analysis→synthesis frame and overlap-add into note.pv.pvOut.
-// PCM in note.data is Float32 normalised to [−1, 1] (from engine.getPcm).
-function pvFrame(note, pitchRatio) {
-  const { data, consonant, length } = note;
-  const pv  = note.pv;
-  const src = pv.srcPos | 0;
-  const Ha  = pitchRatio * HOP;
-  const TPN = 2 * Math.PI / FFT_SIZE;
-
-  for (let i = 0; i < FFT_SIZE; i++) {
-    let p = src + i;
-    if (length > 0 && p >= length) {
-      const sust = length - consonant;
-      p = sust > 0 ? consonant + ((p - consonant) % sust) : length - 1;
-    }
-    if (p < 0) p = 0;
-    const pi = Math.min(p, data ? data.length - 1 : 0);
-    FR[i] = (data ? data[pi] : 0) * WIN[i];
-    FI[i] = 0;
-  }
-
-  fft(FR, FI);
-
-  for (let k = 0; k <= HALF; k++) {
-    const mag   = Math.sqrt(FR[k]*FR[k] + FI[k]*FI[k]);
-    const phase = Math.atan2(FI[k], FR[k]);
-    const dp    = phase - pv.lastPhase[k];
-    pv.lastPhase[k] = phase;
-    const exp   = TPN * k * Ha;
-    pv.synthPhase[k] += exp + princarg(dp - exp);
-    FR[k] = mag * Math.cos(pv.synthPhase[k]);
-    FI[k] = mag * Math.sin(pv.synthPhase[k]);
-  }
-  // Hermitian symmetry → real output.
-  FI[0] = 0;  FI[HALF] = 0;
-  FR[HALF] = Math.sqrt(FR[HALF]*FR[HALF] + FI[HALF]*FI[HALF]);
-  for (let k = 1; k < HALF; k++) {
-    FR[FFT_SIZE - k] =  FR[k];
-    FI[FFT_SIZE - k] = -FI[k];
-  }
-  ifft(FR, FI);
-
-  for (let i = 0; i < FFT_SIZE; i++) pv.pvOut[i] += FR[i] * WIN[i];
-
-  pv.srcPos += Ha;
-}
-
-// Read one output sample from the OLA buffer; trigger a new frame when needed.
-function pvRead(note, pitchRatio) {
-  const pv = note.pv;
-  if (pv.pvReadPos >= HOP) {
-    pv.pvOut.copyWithin(0, HOP);
-    pv.pvOut.fill(0, FFT_SIZE - HOP);
-    pv.pvReadPos = 0;
-    pvFrame(note, pitchRatio);
-  }
-  return pv.pvOut[pv.pvReadPos++] / OLA_NORM;
-}
-
-const SILENT = new Float32Array(0);
-
-class PVProcessor extends AudioWorkletProcessor {
-  static get parameterDescriptors() {
-    return [{ name: 'pitchShift', defaultValue: 0, minValue: -24, maxValue: 24, automationRate: 'k-rate' }];
-  }
-  constructor(options) {
-    super(options);
-    this.manifest = null;
-    this.phonemes = new Map();
-    this.queue    = [];
-    this.current  = null;
-    this.next     = null;
-    this.port.onmessage = e => this.onMessage(e.data);
-  }
-  onMessage(msg) {
-    if (msg.type === 'init' && msg.manifest) {
-      this.manifest = msg.manifest;
-    } else if (msg.type === 'phoneme' && msg.name && msg.buffer) {
-      this.phonemes.set(msg.name, new Float32Array(msg.buffer));
-    } else if (msg.type === 'play' && msg.notes) {
-      this.queue.push(...msg.notes);
-    } else if (msg.type === 'stop') {
-      this.queue = []; this.current = null; this.next = null;
-    }
-  }
-  // Build an ActiveNote. srcStart=entry.pre for fresh current notes (skip lead-in);
-  // caller overrides to 0 for next-prefetch notes so the lead-in crossfades.
-  dequeue(srcStart) {
-    const note = this.queue.shift();
-    if (!note || !this.manifest) return null;
-    if (note.phoneme === '') {
-      return { data: SILENT, length: 0, consonant: 0, pre: 0, overlap: 0,
-               targetHz: 440, recordedHz: 440, remaining: note.duration,
-               pv: makePV(0) };
-    }
-    const entry = this.manifest.phonemes[note.phoneme];
-    const data  = this.phonemes.get(note.phoneme);
-    if (!entry || !data) return null;
-    return { data, length: entry.length, consonant: entry.consonant,
-             pre: entry.pre, overlap: entry.overlap,
-             targetHz: note.pitch, recordedHz: entry.pitch || this.manifest.referencePitch,
-             remaining: note.duration, pv: makePV(srcStart ?? entry.pre) };
-  }
-  process(_in, outputs, params) {
-    const out = outputs[0]?.[0];
-    if (!out) return true;
-    const sliderRatio = Math.pow(2, (params.pitchShift[0] ?? 0) / 12);
-
-    for (let i = 0; i < out.length; i++) {
-      // ── Note rotation ──
-      if (!this.current || this.current.remaining <= 0) {
-        const fromNext = this.next !== null;
-        this.current   = this.next ?? this.dequeue(/* use pre */);
-        this.next      = null;
-        if (!this.current) { out[i] = 0; continue; }
-        // Promoted from next: pv.srcPos already mid-lead-in; fresh: already at pre.
-      }
-      const cur      = this.current;
-      const curRatio = (cur.recordedHz > 0 ? cur.targetHz / cur.recordedHz : 1) * sliderRatio;
-
-      // ── Prefetch next note; start from lead-in (srcPos=0) ──
-      if (!this.next && this.queue.length > 0) {
-        this.next = this.dequeue(0);
-      }
-
-      let sample = cur.length > 0 ? pvRead(cur, curRatio) : 0;
-
-      // Tail fade-out on the last note (inline flushPrev equivalent).
-      if (!this.next && this.queue.length === 0 && cur.remaining <= MIN_XF && cur.length > 0) {
-        sample *= cur.remaining / MIN_XF;
-      }
-
-      // ── Crossfade: next note's preutterance blends over overlap window ──
-      // PV preserves duration, so pre/overlap stay in output-sample units.
-      // The slider ratio is applied to both cur and nxt independently, so the
-      // blend stays coherent even when pitchShift changes mid-crossfade.
-      if (this.next) {
-        const nxt      = this.next;
-        const nxtRatio = (nxt.recordedHz > 0 ? nxt.targetHz / nxt.recordedHz : 1) * sliderRatio;
-        const lead     = Math.max(nxt.pre,     MIN_XF);
-        if (cur.remaining <= lead) {
-          const xfade     = Math.min(Math.max(nxt.overlap, MIN_XF), lead);
-          const into      = lead - cur.remaining;
-          const g         = Math.min(1, into / xfade);
-          const nxtSample = nxt.length > 0 ? pvRead(nxt, nxtRatio) : 0;
-          sample = sample * (1 - g) + nxtSample * g;
-        }
-      }
-
-      out[i] = sample;
-      cur.remaining--;
-    }
-    return true;
-  }
-}
-registerProcessor('pv-processor', PVProcessor);
-`;
-
-    // ── PV state ──
-    let pvNode      = null;
-    let pvReady     = false;
-    const pvDel     = new Set();   // delivered phoneme names
-
-    function updatePVBtn() {
-      $('pvPlayBtn').disabled = !engine || !loadedSong;
-    }
-
-    // Register the PV worklet module lazily (reuses the engine's AudioContext).
-    async function ensurePVNode() {
-      if (pvNode) return;
-      const blob = new Blob([PV_WORKLET_SRC], { type: 'application/javascript' });
-      const url  = URL.createObjectURL(blob);
-      await engine.audioContext.audioWorklet.addModule(url);
-      URL.revokeObjectURL(url);
-      pvNode = new AudioWorkletNode(engine.audioContext, 'pv-processor', {
-        numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1],
-        parameterData: { pitchShift: 0 },
-      });
-      pvNode.connect(engine.audioContext.destination);
-      pvNode.port.postMessage({ type: 'init', manifest: currentManifest });
-      pvDel.clear();
-    }
-
-    // Fetch phoneme PCM via engine.getPcm() (Float64 normalised), send as
-    // Float32ArrayBuffer to the PV worklet (zero-copy transfer).
-    async function deliverPV(name) {
-      if (pvDel.has(name)) return;
-      pvDel.add(name);
-      const f64 = await engine.getPcm(name);
-      if (!f64) return;
-      const f32 = new Float32Array(f64.length);
-      for (let k = 0; k < f64.length; k++) f32[k] = f64[k];
-      const buf = f32.buffer;
-      pvNode.port.postMessage({ type: 'phoneme', name, buffer: buf }, [buf]);
-    }
-
-    // ── pitch slider ──
-    $('pvPitchSlider').addEventListener('input', () => {
-      const v = Number($('pvPitchSlider').value);
-      $('pvPitchVal').textContent = (v >= 0 ? '+' : '') + v.toFixed(1) + ' st';
-      if (pvNode) pvNode.parameters.get('pitchShift').value = v;
-    });
-
-    // ── ④ PV play ──
-    $('pvPlayBtn').addEventListener('click', async () => {
-      if (!engine || !loadedSong || !currentManifest) return;
-      const pvStatus = $('pvStatus');
-      engine?.stop();
-      wlAbort = true;
-      wlSources.forEach(s => { try { s.stop(); } catch {} });
-      wlSources = [];
-      try {
-        await engine.resume();
-        await ensurePVNode();
-
-        const resolve  = buildResolver(currentManifest);
-        const speed    = Number(speedSlider.value) || 1;
-        const msToSamp = ms => Math.round((ms / 1000) * 48000);
-
-        let tempo = loadedSong.tempo, prevVowel = '-', started = false;
-        const notes = [], missing = new Set();
-
-        for (const n of loadedSong.notes) {
-          if (n.tempo) tempo = n.tempo;
-          const durMs = (n.lengthTicks / TICKS_PER_BEAT) * (60000 / tempo) / speed;
-          const isRest = !n.lyric || /^[rR]$/.test(n.lyric);
-          if (isRest) {
-            prevVowel = '-';
-            if (!started) continue;
-            notes.push({ phoneme: '', pitch: 0, duration: msToSamp(Math.min(durMs, REST_CAP_MS)) });
-            continue;
-          }
-          started = true;
-          const alias = resolve(n.lyric, prevVowel, n.noteNum);
-          prevVowel = vowelOf(n.lyric);
-          if (!alias) {
-            missing.add(n.lyric);
-            notes.push({ phoneme: '', pitch: 0, duration: msToSamp(durMs) });
-            continue;
-          }
-          // PV preserves duration exactly — output duration = note duration.
-          notes.push({ phoneme: alias, pitch: midiToHz(n.noteNum), duration: msToSamp(durMs) });
-        }
-
-        const playable = notes.filter(x => x.phoneme).length;
-        if (!playable) { setLog(pvStatus, '✗ 歌詞を解決できませんでした。'); return; }
-
-        // Stop previous PV playback, prefetch PCM, then queue.
-        pvNode.port.postMessage({ type: 'stop' });
-        const names = [...new Set(notes.map(n => n.phoneme).filter(Boolean))];
-        setLog(pvStatus, `音素フェッチ中… (${names.length})`);
-        await Promise.all(names.map(n => deliverPV(n)));
-
-        // Apply current slider value before starting.
-        pvNode.parameters.get('pitchShift').value = Number($('pvPitchSlider').value);
-        pvNode.port.postMessage({ type: 'play', notes });
-
-        setLog(pvStatus, missing.size
-          ? `⚠ 未解決 ${missing.size}種  (${playable} notes 再生中)`
-          : `▶ ${playable} notes 再生中`);
-      } catch (err) {
-        setLog($('pvStatus'), `✗ ${err.message}`);
-        console.error('[pv]', err);
       }
     });
 

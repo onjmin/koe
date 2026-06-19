@@ -1,3 +1,4 @@
+import { cpSync, mkdirSync } from 'node:fs';
 import { defineConfig } from 'tsup';
 
 export default defineConfig([
@@ -10,6 +11,12 @@ export default defineConfig([
     outDir: 'dist',
     clean: true,
     sourcemap: true,
+    // Ship the worldline WASM assets so consumers can load them from the
+    // package (e.g. via a CDN: <cdn>/@onjmin/koe/dist/world/worldline.js).
+    async onSuccess() {
+      mkdirSync('dist/world', { recursive: true });
+      cpSync('demo/world', 'dist/world', { recursive: true });
+    },
   },
   // AudioWorklet processor — IIFE, no imports, runs in audio thread
   {

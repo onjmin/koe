@@ -1,0 +1,925 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <link rel="icon" href="https://avatars.githubusercontent.com/u/88383494" />
+  <title>koe</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DotGothic16&family=Press+Start+2P&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg:     #13131f;
+      --bg2:    #1b1b2e;
+      --panel:  #2a2a44;
+      --panel2: #191929;
+      --ink:    #f4f3f7;
+      --muted:  #9a9ac4;
+      --line:   #4a4a78;
+      --pink:   #ff4d6d;
+      --blue:   #3aa6ff;
+      --green:  #39d98a;
+      --yellow: #ffd23f;
+      --px: 3px;          /* base pixel unit for borders */
+    }
+
+    * , *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { -webkit-text-size-adjust: 100%; }
+    img, canvas { image-rendering: pixelated; }
+
+    body {
+      font-family: 'DotGothic16', monospace;
+      background:
+        repeating-linear-gradient(0deg,  #ffffff06 0 1px, transparent 1px 3px),
+        repeating-linear-gradient(90deg, #ffffff04 0 1px, transparent 1px 3px),
+        var(--bg);
+      color: var(--ink);
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 20px 12px 60px;
+      gap: 16px;
+      line-height: 1.6;
+    }
+
+    .wrap { width: 100%; max-width: 440px; display: flex; flex-direction: column; gap: 16px; }
+
+    /* ── logo ── */
+    header { text-align: center; padding: 8px 0 4px; }
+    .logo {
+      font-family: 'Press Start 2P', monospace;
+      font-size: 40px;
+      color: var(--pink);
+      letter-spacing: 2px;
+      text-shadow: 4px 4px 0 #000, 0 0 0 var(--ink);
+      line-height: 1;
+    }
+    .tagline { font-size: 11px; color: var(--muted); margin-top: 10px; letter-spacing: 1px; }
+
+    /* ── pixel card ── */
+    .card {
+      background: var(--panel);
+      border: var(--px) solid var(--ink);
+      box-shadow: 6px 6px 0 #000;
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .card.off { opacity: .4; filter: grayscale(.6); pointer-events: none; }
+
+    .card-head { display: flex; align-items: center; gap: 10px; }
+    .badge {
+      font-family: 'DotGothic16', monospace;
+      font-size: 12px; font-weight: bold;
+      color: #000;
+      background: var(--yellow);
+      border: var(--px) solid var(--ink);
+      box-shadow: 2px 2px 0 #000;
+      height: 26px; padding: 0 8px;
+      display: flex; align-items: center; justify-content: center;
+      flex-shrink: 0;
+    }
+    .badge.b { background: var(--blue); }
+    .badge.g { background: var(--green); }
+    .card-head h2 { font-size: 15px; letter-spacing: 1px; }
+
+    /* ── section heading & or-divider ── */
+    .section-label {
+      font-size: 12px; color: var(--muted); letter-spacing: 1px;
+      padding: 2px 2px 0; display: flex; align-items: center; gap: 8px;
+    }
+    .section-label::before { content: ''; flex: 0 0 10px; height: 10px; background: var(--pink); border: var(--px) solid var(--ink); }
+    .or {
+      text-align: center; font-size: 12px; color: var(--muted); letter-spacing: 2px;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .or::before, .or::after { content: ''; flex: 1; border-top: var(--px) dashed var(--line); }
+
+    .hint { font-size: 11px; color: var(--muted); }
+
+    label.lbl { font-size: 11px; color: var(--muted); display: block; margin-bottom: 6px; letter-spacing: 1px; }
+
+    /* ── inputs ── */
+    input[type="file"], select, input[type="text"] {
+      width: 100%;
+      font-family: 'DotGothic16', monospace;
+      font-size: 13px;
+      color: var(--ink);
+      background: var(--panel2);
+      border: var(--px) solid var(--line);
+      padding: 8px;
+    }
+    input[type="file"]::file-selector-button {
+      font-family: 'DotGothic16', monospace;
+      background: var(--blue);
+      color: #000;
+      border: var(--px) solid var(--ink);
+      box-shadow: 2px 2px 0 #000;
+      padding: 4px 8px;
+      margin-right: 8px;
+      cursor: pointer;
+    }
+    select:focus, input[type="text"]:focus { outline: none; border-color: var(--blue); }
+
+    .field { display: flex; flex-direction: column; }
+    .row { display: flex; gap: 8px; align-items: center; }
+    .row .lbl { min-width: 74px; margin-bottom: 0; }
+    .grow { flex: 1; min-width: 0; }
+
+    /* ── range slider ── */
+    input[type="range"] {
+      -webkit-appearance: none; appearance: none;
+      width: 100%; height: 14px;
+      background: var(--panel2);
+      border: var(--px) solid var(--line);
+      cursor: pointer;
+    }
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none;
+      width: 16px; height: 18px; margin-top: -2px;
+      background: var(--pink);
+      border: var(--px) solid var(--ink);
+      box-shadow: 2px 2px 0 #000;
+    }
+    input[type="range"]::-moz-range-thumb {
+      width: 16px; height: 18px; border-radius: 0;
+      background: var(--pink);
+      border: var(--px) solid var(--ink);
+    }
+    .slval {
+      font-size: 12px; color: var(--ink); min-width: 52px; text-align: right;
+      background: var(--panel2); border: var(--px) solid var(--line);
+      padding: 2px 4px;
+    }
+
+    /* ── pixel buttons ── */
+    .btn {
+      font-family: 'DotGothic16', monospace;
+      font-size: 14px; letter-spacing: 1px;
+      color: #000;
+      background: var(--pink);
+      border: var(--px) solid var(--ink);
+      box-shadow: 4px 4px 0 #000;
+      padding: 11px 14px;
+      cursor: pointer;
+      transition: transform .05s steps(1), box-shadow .05s steps(1);
+      -webkit-tap-highlight-color: transparent;
+    }
+    .btn:active { transform: translate(4px, 4px); box-shadow: 0 0 0 #000; }
+    .btn.blue  { background: var(--blue); }
+    .btn.green { background: var(--green); }
+    .btn.ghost { background: var(--panel2); color: var(--ink); box-shadow: 4px 4px 0 #000; }
+    .btn:disabled {
+      background: #3a3a52; color: #6c6c8a; box-shadow: 4px 4px 0 #00000060;
+      cursor: not-allowed; transform: none;
+    }
+    .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+    .btn-row .btn { flex: 1; }
+
+    /* ── progress (segmented pixel bar) ── */
+    .progress {
+      height: 18px;
+      background: var(--panel2);
+      border: var(--px) solid var(--ink);
+      padding: 2px;
+    }
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: repeating-linear-gradient(90deg, var(--green) 0 7px, #19593a 7px 9px);
+      transition: width .12s steps(8);
+    }
+
+    /* ── log ── */
+    .log {
+      font-size: 11px; line-height: 1.7; color: var(--muted);
+      background: var(--panel2);
+      border: var(--px) solid var(--line);
+      padding: 8px;
+      max-height: 120px; overflow-y: auto;
+      white-space: pre-wrap; word-break: break-all;
+    }
+    .log.show { display: block; }
+
+    /* ── step arrow ── */
+    .arrow { text-align: center; color: var(--line); font-size: 18px; line-height: 1; }
+
+    .sub { display: flex; flex-direction: column; gap: 10px; }
+    .sub h3 { font-size: 13px; color: var(--blue); letter-spacing: 1px; }
+
+    /* ── accordion ── */
+    .accordion-toggle {
+      display: flex; align-items: center; gap: 10px;
+      cursor: pointer; width: 100%; background: none; border: none; padding: 0;
+      color: var(--ink); font-family: 'DotGothic16', monospace;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .accordion-toggle .acc-arrow {
+      font-size: 11px; color: var(--muted);
+      transition: transform .1s steps(3);
+      flex-shrink: 0;
+    }
+    .accordion-toggle[aria-expanded="true"] .acc-arrow { transform: rotate(90deg); }
+    .accordion-body { display: none; flex-direction: column; gap: 12px; }
+    .accordion-body.open { display: flex; }
+    .divider { border: none; border-top: var(--px) dashed var(--line); margin: 2px 0; }
+
+    footer { font-size: 10px; color: var(--line); text-align: center; padding-top: 4px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div class="logo">koe</div>
+      <div class="tagline">UTAU CONCATENATIVE SYNTH ENGINE</div>
+    </header>
+
+    <div class="section-label">音源を用意する（どちらか）</div>
+
+    <!-- ENTRY A — Load an existing .koe -->
+    <div class="card" id="stepLoad">
+      <div class="card-head"><span class="badge b">読込</span><h2>.koe を開く</h2></div>
+      <p class="hint">すでに .koe を持っているならこちらから。</p>
+      <div class="field">
+        <label class="lbl">.koe ファイル</label>
+        <input type="file" id="koeFile" accept=".koe" />
+      </div>
+      <button class="btn blue" id="loadBtn" disabled>読み込み</button>
+      <div class="log" id="loadLog" style="display:none"></div>
+    </div>
+
+    <div class="or">または</div>
+
+    <!-- ENTRY B — Convert a voice bank -->
+    <div class="card" id="stepConvert">
+      <button class="accordion-toggle" id="convertToggle" aria-expanded="false" aria-controls="convertBody">
+        <span class="badge">変換</span><h2>音源から作る</h2>
+        <span class="acc-arrow" style="margin-left:auto">▶</span>
+      </button>
+      <div class="accordion-body" id="convertBody">
+        <div class="field">
+          <label class="lbl">UTAU 音源フォルダ</label>
+          <input type="file" id="voiceFiles" multiple webkitdirectory />
+          <p class="hint" style="margin-top:6px">フォルダを選んで変換するだけ。録音ピッチは frq から自動取得し、.koe を生成して自動で読み込みます。</p>
+        </div>
+        <div class="btn-row">
+          <button class="btn" id="convertBtn" disabled>変換</button>
+          <button class="btn green" id="downloadBtn" style="display:none">.koe 保存</button>
+        </div>
+        <div class="progress"><div class="progress-bar" id="convertProgress"></div></div>
+        <div class="log" id="convertLog">音源フォルダを選択してください。</div>
+      </div>
+    </div>
+
+    <div class="arrow">▼</div>
+
+    <!-- STEP 3 — Play -->
+    <div class="card off" id="stepPlay">
+      <div class="card-head"><span class="badge g">再生</span><h2>再生</h2></div>
+
+      <!-- single -->
+      <div class="sub">
+        <h3>① 単音</h3>
+        <div class="row">
+          <input type="text" id="phonemeFilter" class="grow" placeholder="filter…" />
+          <button class="btn" id="playOneBtn" style="flex:0 0 auto;padding:8px 12px">▶</button>
+        </div>
+        <select id="phonemeSelect"></select>
+        <div class="row">
+          <label class="lbl">トランスポーズ</label>
+          <input type="range" id="transposeSlider" class="grow" min="-12" max="12" value="0" step="1" />
+          <span id="transposeVal" class="slval">0 st</span>
+        </div>
+      </div>
+
+      <hr class="divider" />
+
+      <!-- UST load + shared params -->
+      <div class="sub">
+        <h3>② UST 読み込み</h3>
+        <div class="field">
+          <label class="lbl">UST ファイル</label>
+          <input type="file" id="ustFile" accept=".ust" />
+        </div>
+        <div class="row">
+          <label class="lbl">相対ピッチ</label>
+          <input type="range" id="relPitchSlider" class="grow" min="-12" max="12" value="0" step="1" />
+          <span id="relPitchVal" class="slval">0 st</span>
+        </div>
+        <p class="hint">UST全体を移調します。モデルごとに得意な音域が違うので、③ に適用されます。</p>
+        <div class="row">
+          <label class="lbl">スピード</label>
+          <input type="range" id="speedSlider" class="grow" min="0.5" max="2" value="1" step="0.05" />
+          <span id="speedVal" class="slval">×1.00</span>
+        </div>
+        <p class="hint">UST を読み込むと ③ で worldline 合成できます。</p>
+        <div class="log" id="songStatus" style="display:none"></div>
+      </div>
+
+      <hr class="divider" />
+
+      <!-- worldline synthesis -->
+      <div class="sub">
+        <h3>③ worldline合成 (UST)</h3>
+        <p class="hint">② と同じ UST を OpenUtau の worldline WASM でオフライン合成します。まず ② で UST を読み込んでください。</p>
+        <button class="btn blue" id="worldPlayBtn" disabled>♪ worldline で歌う</button>
+        <div class="progress"><div class="progress-bar" id="worldProgress"></div></div>
+        <div class="log" id="worldStatus" style="display:none"></div>
+      </div>
+
+      <hr class="divider" />
+      <button class="btn ghost" id="stopBtn">■ 停止</button>
+    </div>
+
+    <footer>koe — pixel build</footer>
+  </div>
+
+  <!-- Diagnostic: surface a clear message if the ES module fails to load
+       (e.g. opened outside the dev server so ./index.js 404s). -->
+  <script>
+    function koeFatal(msg) {
+      const el = document.getElementById('convertLog');
+      if (el) { el.textContent = '✗ ' + msg; el.style.display = 'block'; el.style.color = '#ff4d6d'; }
+      console.error('[koe]', msg);
+    }
+    window.addEventListener('error', (e) => {
+      if (e.target && e.target.tagName === 'SCRIPT') {
+        koeFatal('スクリプトの読み込みに失敗しました: ' + (e.target.src || './index.js') +
+          ' — dev server (http://localhost:3000) 経由で開いてください。');
+      }
+    }, true);
+    window.addEventListener('load', () => setTimeout(() => {
+      if (!window.__koeReady) {
+        koeFatal('index.js の初期化に失敗しました。dev server 経由で開いていますか？ (file:// 直開きは不可)');
+      }
+    }, 1200));
+  </script>
+
+  <script type="module">
+    import {
+      parseOto, normalizePcm, trimToOto,
+      parseFrqAverageF0, frqFileName, pitchFromAliasSuffix,
+      packKoe, KoeEngine, Worldline, leadInFromEntry,
+    } from './index.js';
+
+    // ── state ──
+    let convertedKoe = null;     // Blob
+    let convertedName = 'voice';
+    let engine = null;
+    let currentManifest = null;
+    let loadedSong = null;
+    let allNames = [];
+
+    // ── utils ──
+    const $ = id => document.getElementById(id);
+
+    // ── accordion ──
+    const convertToggle = $('convertToggle');
+    const convertBody = $('convertBody');
+    convertToggle.addEventListener('click', () => {
+      const open = convertBody.classList.toggle('open');
+      convertToggle.setAttribute('aria-expanded', open);
+    });
+    const appendLog = (el, msg) => { el.textContent += msg + '\n'; el.scrollTop = el.scrollHeight; el.style.display = 'block'; };
+    const setLog = (el, msg) => { el.textContent = msg; el.style.display = 'block'; };
+    const setProgress = (el, p) => { el.style.width = (Math.max(0, Math.min(1, p)) * 100).toFixed(1) + '%'; };
+    const enable = card => card.classList.remove('off');
+    const dl = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); };
+
+    // ════════ STEP 1 — Convert ════════
+    const voiceFiles = $('voiceFiles');
+    const convertBtn = $('convertBtn');
+    const downloadBtn = $('downloadBtn');
+    const convertLog = $('convertLog');
+    const convertProgress = $('convertProgress');
+
+    voiceFiles.addEventListener('change', () => {
+      const n = voiceFiles.files.length;
+      convertBtn.disabled = n === 0;
+      const dir = voiceFiles.files[0]?.webkitRelativePath.split('/')[0] || '';
+      convertBtn.textContent = n ? `▶ 変換する（${n} ファイル）` : '変換';
+      setLog(convertLog, n ? `「${dir}」 — ${n} ファイル。変換ボタンを押してください。` : '音源フォルダを選択してください。');
+    });
+
+    convertBtn.addEventListener('click', async () => {
+      convertBtn.disabled = true;
+      downloadBtn.style.display = 'none';
+      convertLog.textContent = '';
+      setProgress(convertProgress, 0);
+      try {
+        const { koe, name, count, skipped } = await runConvert();
+        convertedKoe = koe;
+        convertedName = name;
+        setProgress(convertProgress, 1);
+        appendLog(convertLog, `✓ ${count} 音素 (${skipped} skip) — ${(koe.size / 1048576).toFixed(2)} MB`);
+        downloadBtn.style.display = '';
+        await initEngine(koe, loadLog);
+      } catch (err) {
+        appendLog(convertLog, `✗ ${err.message}`);
+        console.error(err);
+      } finally {
+        convertBtn.disabled = false;
+      }
+    });
+
+    downloadBtn.addEventListener('click', () => {
+      if (convertedKoe) dl(convertedKoe, `${convertedName}.koe`);
+    });
+
+    async function runConvert() {
+      const fileMap = {};
+      for (const f of voiceFiles.files) fileMap[f.webkitRelativePath.replace(/\\/g, '/')] = f;
+      const topDir = (voiceFiles.files[0]?.webkitRelativePath.split('/')[0]) || 'voice';
+
+      const otoFiles = Object.entries(fileMap).filter(([p]) => /(^|\/)oto\.ini$/i.test(p));
+      if (!otoFiles.length) throw new Error('oto.ini が見つかりません（フォルダごと選択してください）');
+
+      // Pass 1: collect every entry so the total — and the progress bar — is fixed.
+      const allEntries = [];
+      for (const [otoPath, otoFile] of otoFiles) {
+        const otoDir = otoPath.includes('/') ? otoPath.slice(0, otoPath.lastIndexOf('/') + 1) : '';
+        const content = new TextDecoder('shift_jis').decode(await otoFile.arrayBuffer());
+        for (const oto of parseOto(content)) allEntries.push({ oto, otoDir });
+      }
+      const total = allEntries.length;
+      appendLog(convertLog, `${otoFiles.length} oto.ini / ${total} エントリ`);
+
+      // Pass 2: process with a monotonic counter (x of y).
+      const phonemes = {};
+      const blobParts = [];
+      let byteOffset = 0, count = 0, skipped = 0, processed = 0;
+
+      for (const { oto, otoDir } of allEntries) {
+        processed++;
+        setProgress(convertProgress, processed / total);
+
+        const wavFile = fileMap[otoDir + oto.wav];
+        if (!wavFile) { skipped++; continue; }
+        try {
+          const pcm = normalizePcm(await wavFile.arrayBuffer());
+
+          // recorded pitch: frq average → alias suffix → autocorrelation (in trimToOto)
+          let recordedPitch = pitchFromAliasSuffix(oto.alias) ?? 0;
+          const frqFile = fileMap[otoDir + frqFileName(oto.wav)];
+          if (frqFile) { const avg = parseFrqAverageF0(await frqFile.arrayBuffer()); if (avg) recordedPitch = avg; }
+
+          const { pcm: slice, entry } = trimToOto(pcm, oto, recordedPitch);
+          if (slice.length === 0) { skipped++; continue; }
+          phonemes[oto.alias] = { offset: byteOffset, ...entry };
+          byteOffset += slice.byteLength;
+          blobParts.push(slice.slice());
+          count++;
+        } catch (e) {
+          skipped++;
+          appendLog(convertLog, `[skip] ${oto.alias}: ${e.message}`);
+        }
+      }
+
+      if (!count) throw new Error('変換できる音素がありません');
+      const manifest = { sampleRate: 48000, referencePitch: 220, phonemes };
+      return { koe: packKoe(manifest, blobParts), name: topDir, count, skipped };
+    }
+
+    // ════════ Load an existing .koe ════════
+    const loadBtn = $('loadBtn');
+    const loadLog = $('loadLog');
+
+    $('koeFile').addEventListener('change', () => {
+      loadBtn.disabled = $('koeFile').files.length === 0;
+    });
+
+    loadBtn.addEventListener('click', async () => {
+      const file = $('koeFile').files[0];
+      if (!file) { setLog(loadLog, '✗ .koe ファイルを選択してください'); return; }
+      loadBtn.disabled = true;
+      try {
+        await initEngine(file, loadLog);
+      } catch (err) {
+        appendLog(loadLog, `✗ ${err.message}`);
+      } finally {
+        loadBtn.disabled = false;
+      }
+    });
+
+    async function initEngine(koe, logEl) {
+      try {
+        setLog(logEl, '読み込み中…');
+        engine = new KoeEngine({ workletUrl: './koe-worklet.js' });
+        await engine.load(koe);
+        currentManifest = engine.manifest;
+        allNames = Object.keys(currentManifest.phonemes);
+        appendLog(logEl, `✓ ${allNames.length} 音素 (オンデマンド)`);
+        setupPlayback(allNames);
+        enable($('stepPlay'));
+      } catch (err) {
+        const detail = [err?.name, err?.message].filter(Boolean).join(' | ');
+        appendLog(logEl, `✗ ${detail}`);
+        console.error('[koe] initEngine failed:', err);
+        throw err;
+      }
+    }
+
+    // ════════ STEP 3 — Play ════════
+    const transposeSlider = $('transposeSlider');
+    const speedSlider = $('speedSlider');
+    const phonemeSelect = $('phonemeSelect');
+    const phonemeFilter = $('phonemeFilter');
+
+    transposeSlider.addEventListener('input', () => {
+      const v = Number(transposeSlider.value);
+      $('transposeVal').textContent = `${v > 0 ? '+' : ''}${v} st`;
+    });
+    speedSlider.addEventListener('input', () => {
+      $('speedVal').textContent = '×' + Number(speedSlider.value).toFixed(2);
+    });
+    const relPitchSlider = $('relPitchSlider');
+    relPitchSlider.addEventListener('input', () => {
+      const v = Number(relPitchSlider.value);
+      $('relPitchVal').textContent = `${v > 0 ? '+' : ''}${v} st`;
+    });
+    // UST-wide transpose in semitones, applied to ③ (worldline). Lets the user
+    // shift the melody into a range the synth model handles best.
+    const relPitch = () => Number(relPitchSlider.value) || 0;
+    $('stopBtn').addEventListener('click', () => {
+      engine?.stop();
+      wlAbort = true;
+      wlSources.forEach(s => { try { s.stop(); } catch {} });
+      wlSources = [];
+    });
+
+    function setupPlayback(names) {
+      allNames = names;
+      populateSelect(names);
+      updateWorldBtn();
+    }
+
+    // ── ① single sound ──
+    function populateSelect(names) {
+      const frag = document.createDocumentFragment();
+      for (const name of names.slice(0, 2000)) {
+        const opt = document.createElement('option');
+        opt.value = name; opt.textContent = name;
+        frag.appendChild(opt);
+      }
+      phonemeSelect.innerHTML = '';
+      phonemeSelect.appendChild(frag);
+      if (names.length > 2000) {
+        const opt = document.createElement('option');
+        opt.disabled = true; opt.textContent = `… 他 ${names.length - 2000} 件（filter で絞り込み）`;
+        phonemeSelect.appendChild(opt);
+      }
+    }
+
+    phonemeFilter.addEventListener('input', () => {
+      const q = phonemeFilter.value.trim().toLowerCase();
+      populateSelect(q ? allNames.filter(n => n.toLowerCase().includes(q)) : allNames);
+    });
+
+    $('playOneBtn').addEventListener('click', async () => {
+      if (!engine || !phonemeSelect.value) return;
+      const entry = currentManifest?.phonemes[phonemeSelect.value];
+      if (!entry) return;
+      wlAbort = true;
+      wlSources.forEach(s => { try { s.stop(); } catch {} });
+      wlSources = [];
+      const recorded = entry.pitch || currentManifest.referencePitch || 220;
+      const stepRate = 2 ** (Number(transposeSlider.value) / 12);
+      try {
+        await engine.resume();
+        await engine.play([{ phoneme: phonemeSelect.value, pitch: recorded * stepRate, duration: Math.ceil(entry.length / stepRate) }]);
+      } catch (err) { console.error('[koe] play failed:', err); }
+    });
+
+    // ── ② melody: UST ──
+    const midiToHz = m => 440 * 2 ** ((m - 69) / 12);
+    const TICKS_PER_BEAT = 480;
+    const REST_CAP_MS = 700;
+
+    const KANA_VOWEL = {};
+    {
+      const rows = {
+        a: 'あぁかがさざただなはばぱまやゃらわ',
+        i: 'いぃきぎしじちぢにひびぴみり',
+        u: 'うぅくぐすずつづぬふぶぷむゆゅるゔ',
+        e: 'えぇけげせぜてでねへべぺめれ',
+        o: 'おぉこごそぞとどのほぼぽもよょろを',
+        n: 'んン',
+      };
+      for (const [v, chars] of Object.entries(rows)) for (const c of chars) KANA_VOWEL[c] = v;
+    }
+    const vowelOf = lyric => {
+      for (let i = lyric.length - 1; i >= 0; i--) if (KANA_VOWEL[lyric[i]]) return KANA_VOWEL[lyric[i]];
+      return '-';
+    };
+
+    const NAME_SEMITONE = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b: 11 };
+    const nameToMidi = name => {
+      const m = /^([A-Ga-g])([#b]?)(-?\d+)$/.exec(name);
+      if (!m) return null;
+      let semi = NAME_SEMITONE[m[1].toLowerCase()];
+      if (m[2] === '#') semi++; else if (m[2] === 'b') semi--;
+      return (parseInt(m[3], 10) + 1) * 12 + semi;
+    };
+
+    // Resolver: VCV / single, multi-pitch → nearest recorded pitch (like the matcher tool).
+    function buildResolver(manifest) {
+      const names = new Set(Object.keys(manifest.phonemes));
+      const pitches = [];
+      for (const n of names) {
+        const m = /_([A-G][#b]?-?\d+)$/.exec(n);
+        if (m) { const midi = nameToMidi(m[1]); if (midi != null && !pitches.some(p => p.token === m[1])) pitches.push({ token: m[1], midi }); }
+      }
+      const nearest = noteNum => pitches.slice().sort((a, b) => Math.abs(a.midi - noteNum) - Math.abs(b.midi - noteNum)).map(p => p.token);
+      return (lyric, prevVowel, noteNum) => {
+        const bases = [`${prevVowel} ${lyric}`, `- ${lyric}`, lyric, `* ${lyric}`];
+        if (pitches.length) for (const t of nearest(noteNum)) for (const b of bases) if (names.has(`${b}_${t}`)) return `${b}_${t}`;
+        for (const b of bases) if (names.has(b)) return b;
+        return null;
+      };
+    }
+
+    function parseUST(buffer) {
+      const text = new TextDecoder('shift_jis').decode(buffer);
+      let tempo = 120, projectName = '', section = null, cur = null;
+      const notes = [];
+      for (const raw of text.split(/\r?\n/)) {
+        const line = raw.trim();
+        const head = /^\[#(.+)\]$/.exec(line);
+        if (head) {
+          if (cur) notes.push(cur);
+          section = head[1];
+          cur = /^\d+$/.test(section) ? { lengthTicks: 480, lyric: '', noteNum: 60, tempo: null } : null;
+          continue;
+        }
+        const eq = line.indexOf('=');
+        if (eq < 0) continue;
+        const key = line.slice(0, eq).trim(), val = line.slice(eq + 1).trim();
+        if (section === 'SETTING') {
+          if (key === 'Tempo') tempo = parseFloat(val) || tempo;
+          else if (key === 'ProjectName') projectName = val;
+        } else if (cur) {
+          if (key === 'Length') cur.lengthTicks = parseInt(val, 10) || 0;
+          else if (key === 'Lyric') cur.lyric = val;
+          else if (key === 'NoteNum') cur.noteNum = parseInt(val, 10) || 60;
+          else if (key === 'Tempo') cur.tempo = parseFloat(val) || null;
+        }
+      }
+      if (cur) notes.push(cur);
+      return { tempo, projectName, notes };
+    }
+
+    const ustFile = $('ustFile');
+    const songStatus = $('songStatus');
+
+    ustFile.addEventListener('change', async () => {
+      const file = ustFile.files[0];
+      if (!file) return;
+      try {
+        loadedSong = parseUST(await file.arrayBuffer());
+        const real = loadedSong.notes.filter(n => n.lyric && !/^[rR]$/.test(n.lyric)).length;
+        setLog(songStatus, `✓ ${loadedSong.projectName || file.name} — ${real} notes / ${loadedSong.tempo} BPM`);
+        updateWorldBtn();
+      } catch (err) {
+        setLog(songStatus, `✗ UST parse failed: ${err.message}`);
+        console.error(err);
+      }
+    });
+
+    // ── ③ worldline synthesis (UST) ──
+    const worldPlayBtn = $('worldPlayBtn');
+    const worldStatus = $('worldStatus');
+    const worldProgressEl = $('worldProgress');
+
+    // The worldline WASM renderer now lives in the library (@onjmin/koe).
+    // Demo concern = scheduling only; synthesis is `wl.renderNote(...)` below.
+    let wl = null;
+
+    // Render one note's PCM via the library renderer. Returns Float32 @48k or null.
+    async function worldlineNote1(phoneme, pitch, durMs, baseTempo, manifest) {
+      const entry = manifest.phonemes[phoneme];
+      if (!entry) return null;
+      const pcm = await engine.getPcm(phoneme);
+      if (!pcm) return null;
+      return wl.renderNote({
+        pcm,
+        pitch,
+        durationMs: durMs,
+        tempo: baseTempo,
+        ...leadInFromEntry(entry),
+      });
+    }
+
+    let wlAbort = false;
+    let wlSources = [];
+
+    function updateWorldBtn() {
+      worldPlayBtn.disabled = !engine || !loadedSong;
+    }
+
+    worldPlayBtn.addEventListener('click', async () => {
+      if (!engine || !loadedSong || !currentManifest) return;
+      engine?.stop();
+      wlAbort = true;
+      wlSources.forEach(s => { try { s.stop(); } catch {} });
+      wlSources = [];
+      wlAbort = false;
+
+      worldPlayBtn.disabled = true;
+      setProgress(worldProgressEl, 0);
+      setLog(worldStatus, 'worldline 読み込み中…');
+
+      try {
+        if (!wl) wl = await Worldline.load({ scriptUrl: './world/worldline.js' });
+        await engine.resume();
+        const audioCtx = engine.audioContext;
+        const FS = 48000;
+        const MIN_XF_MS   = 5;   // crossfade minimum (ms)
+        const TAIL_FADE_MS = 10; // free-end click-prevention fade (ms)
+        const LOOKAHEAD_S  = 0.2;
+        // VCV preutterance (often > note length) handling: keep only a short lead-in
+        // before the beat (enough for the consonant), skipping the long redundant
+        // leading vowel that the previous note already sings — otherwise two vowels
+        // overlap for ~a whole note ("two voices"). Crossfade only the overlap window.
+        const LEADCAP_MS = 90; // max lead-in kept before the beat
+        const XF_MS      = 35; // crossfade length
+
+        const resolveAlias = buildResolver(currentManifest);
+        const speed = Number(speedSlider.value) || 1;
+
+        // Equal-power crossfade curves (sin/cos pair).
+        function makeXfCurves(nSamples) {
+          nSamples = Math.max(2, nSamples);
+          const fadeIn  = new Float32Array(nSamples);
+          const fadeOut = new Float32Array(nSamples);
+          for (let k = 0; k < nSamples; k++) {
+            const t = k / (nSamples - 1);
+            fadeIn[k]  = Math.sin(Math.PI / 2 * t);
+            fadeOut[k] = Math.cos(Math.PI / 2 * t);
+          }
+          return { fadeIn, fadeOut };
+        }
+
+        // Schedule a fade-out curve on a GainNode, guarding against:
+        //   - past-time scheduling (fadeOutStart <= now)
+        //   - overlap with a prior curve that ends at fadeInEnd
+        function scheduleFadeOut(gainNode, fadeOutStart, xfMs, fadeInEnd) {
+          const now = audioCtx.currentTime;
+          // Clamp start to after the fade-in ends and after now+epsilon
+          const safeStart = Math.max(fadeOutStart, fadeInEnd + 0.001, now + 0.005);
+          const { fadeOut } = makeXfCurves(Math.max(2, Math.round(xfMs / 1000 * FS)));
+          try {
+            gainNode.gain.setValueCurveAtTime(fadeOut, safeStart, xfMs / 1000);
+          } catch (_) {
+            // Fallback: plain linear ramp if curve still conflicts
+            gainNode.gain.linearRampToValueAtTime(0.0, safeStart + xfMs / 1000);
+          }
+        }
+
+        // Per-note state carried across iterations for the deferred fade-out pattern.
+        // prevGain: GainNode of the previous voiced note (null if chain broken)
+        // prevFadeInEnd: AC time when prevGain's fade-in curve ends
+        // prevEndAcT: AC time when prevGain's audio buffer ends
+        let prevGain = null, prevFadeInEnd = 0, prevEndAcT = 0;
+        let prevDurMs = 0;     // previous voiced note length (for preutterance correction)
+        let isFreeHead = true; // next voiced note starts a new chain
+
+        // Flush: apply tail fade-out to the current prevGain and break the chain.
+        function flushPrev() {
+          if (!prevGain) return;
+          const now = audioCtx.currentTime;
+          const fadeMs = TAIL_FADE_MS;
+          const fadeOutStart = prevEndAcT - fadeMs / 1000;
+          if (fadeOutStart > prevFadeInEnd + 0.001 && fadeOutStart > now + 0.005) {
+            scheduleFadeOut(prevGain, fadeOutStart, fadeMs, prevFadeInEnd);
+          }
+          prevGain = null;
+          isFreeHead = true;
+        }
+
+        // ── Streaming synthesis + immediate scheduling ──
+        let tempo = loadedSong.tempo, prevVowel = '-';
+        let beatAt = audioCtx.currentTime + LOOKAHEAD_S; // AC time of the upcoming beat
+        let done = 0;
+        const totalNotes = loadedSong.notes.filter(n => {
+          const isRest = !n.lyric || /^[rR]$/.test(n.lyric);
+          return !isRest;
+        }).length;
+        setLog(worldStatus, `合成しながら再生中… 0 / ${totalNotes}`);
+
+        for (const n of loadedSong.notes) {
+          if (wlAbort) break;
+          if (n.tempo) tempo = n.tempo;
+          const durMs = (n.lengthTicks / TICKS_PER_BEAT) * (60000 / tempo) / speed;
+          const isRest = !n.lyric || /^[rR]$/.test(n.lyric);
+
+          if (isRest) {
+            flushPrev(); // chain broken by rest
+            prevVowel = '-';
+            beatAt += Math.min(durMs, REST_CAP_MS) / 1000;
+            continue;
+          }
+
+          const noteNum = n.noteNum + relPitch();
+          const alias = resolveAlias(n.lyric, prevVowel, noteNum);
+          prevVowel = vowelOf(n.lyric);
+
+          if (!alias) {
+            // unresolved lyric — treat as rest for chain purposes
+            flushPrev();
+            beatAt += durMs / 1000;
+            continue;
+          }
+
+          const entry = currentManifest.phonemes[alias];
+          const preMs = entry ? (entry.pre     || 0) / FS * 1000 : 0;
+
+          const audio = await worldlineNote1(alias, midiToHz(noteNum), durMs, loadedSong.tempo, currentManifest);
+          if (wlAbort) break;
+
+          // Null / too-short audio: skip but break chain
+          if (!audio || audio.length === 0) {
+            flushPrev();
+            beatAt += durMs / 1000;
+            continue;
+          }
+
+          // ── Preutterance correction ──
+          // worldlineNote1 returns [lead-in/consonant ≈ preMs][vowel ≈ durMs]. The full
+          // lead-in is preMs (often 300ms > note). Keep only effPre of it before the
+          // beat (≤ LEADCAP, ≤ prev note) and skip the rest from the buffer HEAD — that
+          // drops the long redundant leading vowel (→ no "two voices") but keeps the
+          // consonant (which sits near preMs). The vowel onset (buffer offset preMs)
+          // then lands exactly on the beat.
+          let effPre = preMs;
+          if (!isFreeHead) effPre = Math.min(effPre, LEADCAP_MS, prevDurMs > 0 ? prevDurMs : effPre);
+          const skipS = (preMs - effPre) / 1000;          // trimmed from the buffer head
+          // Floor at MIN_XF_MS so CV banks with preMs=0 (effPre=0) still get a valid,
+          // non-zero anti-click fade (setValueCurveAtTime needs a positive duration).
+          const xfMs  = Math.max(MIN_XF_MS, Math.min(effPre, XF_MS));
+
+          const startAcT  = Math.max(beatAt - effPre / 1000, audioCtx.currentTime + 0.005);
+          const playDurS  = audio.length / FS - skipS;     // played length (lead-in trimmed)
+          const endAcT    = startAcT + playDurS;           // ≈ next beat
+
+          const ab  = audioCtx.createBuffer(1, audio.length, FS);
+          ab.getChannelData(0).set(audio);
+          const src  = audioCtx.createBufferSource();
+          src.buffer = ab;
+          const gain = audioCtx.createGain();
+          src.connect(gain);
+          gain.connect(audioCtx.destination);
+
+          // ── Fade-in for this note (over the lead-in / overlap with prev) ──
+          let fadeInEndAcT;
+          const finMs = isFreeHead ? TAIL_FADE_MS : xfMs;
+          {
+            const { fadeIn } = makeXfCurves(Math.max(2, Math.round(finMs / 1000 * FS)));
+            gain.gain.setValueAtTime(0.0, startAcT);
+            gain.gain.setValueCurveAtTime(fadeIn, startAcT, finMs / 1000);
+            fadeInEndAcT = startAcT + finMs / 1000;
+          }
+
+          // ── Deferred fade-out on the PREVIOUS note ──
+          // Each buffer ends at its natural end ≈ the NEXT beat, so crossfade prev out
+          // over THIS note's xfMs at prev's tail, blending into this note's lead-in.
+          if (prevGain) {
+            scheduleFadeOut(prevGain, prevEndAcT - xfMs / 1000, xfMs, prevFadeInEnd);
+          }
+
+          src.start(startAcT, skipS); // skip the trimmed lead-in; beat stays aligned
+          wlSources.push(src);
+
+          // Hand off state for next iteration
+          prevGain      = gain;
+          prevFadeInEnd = fadeInEndAcT;
+          prevEndAcT    = endAcT;
+          prevDurMs     = durMs;
+          isFreeHead    = false;
+
+          beatAt += durMs / 1000;
+          done++;
+          setProgress(worldProgressEl, done / totalNotes);
+          setLog(worldStatus, `合成しながら再生中… ${done} / ${totalNotes}`);
+          await new Promise(r => setTimeout(r, 0));
+        }
+
+        // ── Flush the final note ──
+        flushPrev();
+
+        if (!wlAbort) setLog(worldStatus, `✓ ${totalNotes} notes 完了`);
+      } catch (err) {
+        setLog(worldStatus, `✗ ${err.message}`);
+        console.error('[worldline]', err);
+      } finally {
+        worldPlayBtn.disabled = false;
+      }
+    });
+
+    // Signal to the diagnostic guard that the module loaded and wired up.
+    window.__koeReady = true;
+  </script>
+</body>
+</html>

@@ -140,9 +140,10 @@ export class KoeEngine {
     return load;
   }
 
-  /** Preload the phonemes for `notes`, then queue them for playback. */
+  /** Stop current playback, preload the phonemes for `notes`, then queue them. */
   async play(notes: NoteEvent[]): Promise<void> {
     if (!this.node) throw new Error('KoeEngine: call load() before play()');
+    this.node.port.postMessage({ type: 'stop' });
     const names = [...new Set(notes.map(n => n.phoneme))].filter(Boolean);
     await Promise.all(names.map(n => this.ensurePhoneme(n)));
     this.node.port.postMessage({ type: 'play', notes });

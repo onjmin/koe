@@ -775,7 +775,12 @@
     const MIN_WORLD_SAMPLES = 4096;
 
     // Synthesize a single note via PhraseSynth and return raw Float32 audio.
-    // posMs = preMs so the output begins at the preutterance (before the beat).
+    // The output buffer is [lead-in/consonant ≈ preMs][vowel ≈ durMs]: rendered from
+    // the sample offset (posMs=0, no leading silence) for preMs+durMs. The buffer's
+    // beat (vowel onset / preutterance) sits at offset ≈ preMs, so the caller places
+    // it at startAcT = beat − preMs (consonant before the beat, vowel on the beat).
+    // (The old posMs=preMs / length=durMs rendered leading SILENCE and dropped the
+    //  consonant, mistiming VCV — see git history.)
     // No internal crossfade — caller applies GainNode fade-in/out externally.
     async function worldlineNote1(WL, phoneme, pitch, durMs, baseTempo, manifest) {
       const FS = 48000;
@@ -788,7 +793,8 @@
       const preMs = (entry.pre      || 0) / FS * 1000;
       const conMs = (entry.consonant || 0) / FS * 1000;
       const midiNote = Math.round(69 + 12 * Math.log2(pitch / 440));
-      const posMs    = preMs; // beat at preMs within the output buffer
+      const posMs    = 0;             // no leading silence
+      const reqLen   = preMs + durMs; // render lead-in/consonant + vowel
 
       // cut_off must trim at least ~2 frames off the tail. PhraseSynth::AddRequest
       // computes the trim frame count as ceil(in_length_ms)/frame_ms, but PyinEstimator
@@ -814,7 +820,7 @@
       sv(20,  midiNote,      'i32');
       sv(24,  100.0,         'double');
       sv(32,  0.0,           'double');
-      sv(40,  durMs,         'double');
+      sv(40,  reqLen,        'double');
       sv(48,  conMs,         'double');
       sv(56,  cutMs,         'double');
       sv(64,  100.0,         'double');
@@ -830,12 +836,12 @@
       sv(116, 100,           'i32');
 
       // skip/fadeIn/fadeOut all 0 — crossfade is handled externally via GainNode
-      WL._PhraseSynthAddRequest(ps, reqPtr, posMs, 0.0, durMs, 0.0, 0.0, 0);
+      WL._PhraseSynthAddRequest(ps, reqPtr, posMs, 0.0, reqLen, 0.0, 0.0, 0);
       WL._free(samplePtr);
       WL._free(reqPtr);
 
-      const totalMs = preMs + durMs + WL_FRAME_MS * 2;
-      const nFrames = Math.ceil(totalMs / WL_FRAME_MS) + 2;
+      const totalMs = posMs + reqLen + WL_FRAME_MS * 2;
+      const nFrames = Math.ceil(totalMs / WL_FRAME_MS) + 4;
       const f0Arr = new Float64Array(nFrames).fill(pitch);
       const gArr  = new Float64Array(nFrames).fill(0.5);
       const tArr  = new Float64Array(nFrames).fill(0.5);
@@ -901,6 +907,12 @@
         const MIN_XF_MS   = 5;   // crossfade minimum (ms)
         const TAIL_FADE_MS = 10; // free-end click-prevention fade (ms)
         const LOOKAHEAD_S  = 0.2;
+        // VCV preutterance (often > note length) handling: keep only a short lead-in
+        // before the beat (enough for the consonant), skipping the long redundant
+        // leading vowel that the previous note already sings — otherwise two vowels
+        // overlap for ~a whole note ("two voices"). Crossfade only the overlap window.
+        const LEADCAP_MS = 90; // max lead-in kept before the beat
+        const XF_MS      = 35; // crossfade length
 
         const resolveAlias = buildResolver(currentManifest);
         const speed = Number(speedSlider.value) || 1;
@@ -939,6 +951,7 @@
         // prevFadeInEnd: AC time when prevGain's fade-in curve ends
         // prevEndAcT: AC time when prevGain's audio buffer ends
         let prevGain = null, prevFadeInEnd = 0, prevEndAcT = 0;
+        let prevDurMs = 0;     // previous voiced note length (for preutterance correction)
         let isFreeHead = true; // next voiced note starts a new chain
 
         // Flush: apply tail fade-out to the current prevGain and break the chain.
@@ -989,7 +1002,6 @@
 
           const entry = currentManifest.phonemes[alias];
           const preMs = entry ? (entry.pre     || 0) / FS * 1000 : 0;
-          const olMs  = entry ? (entry.overlap || 0) / FS * 1000 : 0;
 
           const audio = await worldlineNote1(WL, alias, midiToHz(n.noteNum), durMs, loadedSong.tempo, currentManifest);
           if (wlAbort) break;
@@ -1001,9 +1013,21 @@
             continue;
           }
 
-          const startAcT  = Math.max(beatAt - preMs / 1000, audioCtx.currentTime + 0.005);
-          const audioDurS = audio.length / FS;
-          const endAcT    = startAcT + audioDurS;
+          // ── Preutterance correction ──
+          // worldlineNote1 returns [lead-in/consonant ≈ preMs][vowel ≈ durMs]. The full
+          // lead-in is preMs (often 300ms > note). Keep only effPre of it before the
+          // beat (≤ LEADCAP, ≤ prev note) and skip the rest from the buffer HEAD — that
+          // drops the long redundant leading vowel (→ no "two voices") but keeps the
+          // consonant (which sits near preMs). The vowel onset (buffer offset preMs)
+          // then lands exactly on the beat.
+          let effPre = preMs;
+          if (!isFreeHead) effPre = Math.min(effPre, LEADCAP_MS, prevDurMs > 0 ? prevDurMs : effPre);
+          const skipS = (preMs - effPre) / 1000;          // trimmed from the buffer head
+          const xfMs  = Math.min(effPre, Math.max(XF_MS, MIN_XF_MS));
+
+          const startAcT  = Math.max(beatAt - effPre / 1000, audioCtx.currentTime + 0.005);
+          const playDurS  = audio.length / FS - skipS;     // played length (lead-in trimmed)
+          const endAcT    = startAcT + playDurS;           // ≈ next beat
 
           const ab  = audioCtx.createBuffer(1, audio.length, FS);
           ab.getChannelData(0).set(audio);
@@ -1013,42 +1037,31 @@
           src.connect(gain);
           gain.connect(audioCtx.destination);
 
-          // ── Fade-in for this note ──
+          // ── Fade-in for this note (over the lead-in / overlap with prev) ──
           let fadeInEndAcT;
-          if (isFreeHead) {
-            const fadeMs = Math.min(TAIL_FADE_MS, preMs > 0 ? preMs : TAIL_FADE_MS);
-            const { fadeIn } = makeXfCurves(Math.max(2, Math.round(fadeMs / 1000 * FS)));
+          const finMs = isFreeHead ? TAIL_FADE_MS : xfMs;
+          {
+            const { fadeIn } = makeXfCurves(Math.max(2, Math.round(finMs / 1000 * FS)));
             gain.gain.setValueAtTime(0.0, startAcT);
-            gain.gain.setValueCurveAtTime(fadeIn, startAcT, fadeMs / 1000);
-            fadeInEndAcT = startAcT + fadeMs / 1000;
-          } else {
-            const xfMs = Math.max(olMs, MIN_XF_MS);
-            const { fadeIn } = makeXfCurves(Math.max(2, Math.round(xfMs / 1000 * FS)));
-            gain.gain.setValueAtTime(0.0, startAcT);
-            gain.gain.setValueCurveAtTime(fadeIn, startAcT, xfMs / 1000);
-            fadeInEndAcT = startAcT + xfMs / 1000;
+            gain.gain.setValueCurveAtTime(fadeIn, startAcT, finMs / 1000);
+            fadeInEndAcT = startAcT + finMs / 1000;
           }
 
           // ── Deferred fade-out on the PREVIOUS note ──
-          // Each note's buffer is [leading silence of preMs][syllable ≈ durMs] and
-          // is placed at beatAt−preMs, so the syllable spans [beat, beat+dur] and the
-          // buffer ends right at the NEXT beat. Anchoring the fade-out at the next
-          // note's startAcT (= nextBeat − preMs, deep inside that silent lead-in) cut
-          // the previous syllable after only ~(dur−(pre−overlap)) ms — leaving the
-          // rest as silence (measured: 72% of the song went silent → choppy, "only
-          // vowels"). Always tail-fade prev at its NATURAL end instead; the buffers
-          // butt together at the beat for gapless legato.
+          // Each buffer ends at its natural end ≈ the NEXT beat, so crossfade prev out
+          // over THIS note's xfMs at prev's tail, blending into this note's lead-in.
           if (prevGain) {
-            scheduleFadeOut(prevGain, prevEndAcT - TAIL_FADE_MS / 1000, TAIL_FADE_MS, prevFadeInEnd);
+            scheduleFadeOut(prevGain, prevEndAcT - xfMs / 1000, xfMs, prevFadeInEnd);
           }
 
-          src.start(startAcT);
+          src.start(startAcT, skipS); // skip the trimmed lead-in; beat stays aligned
           wlSources.push(src);
 
           // Hand off state for next iteration
           prevGain      = gain;
           prevFadeInEnd = fadeInEndAcT;
           prevEndAcT    = endAcT;
+          prevDurMs     = durMs;
           isFreeHead    = false;
 
           beatAt += durMs / 1000;

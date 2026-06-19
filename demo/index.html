@@ -790,6 +790,13 @@
       const midiNote = Math.round(69 + 12 * Math.log2(pitch / 440));
       const posMs    = preMs; // beat at preMs within the output buffer
 
+      // cut_off must trim at least ~2 frames off the tail. PhraseSynth::AddRequest
+      // computes the trim frame count as ceil(in_length_ms)/frame_ms, but PyinEstimator
+      // yields floor(N/nhop)−1 frames — one fewer. With cut_off=0 the requested frame
+      // count exceeds f0_.size() and Model::Trim's f0_.erase() runs past end(), causing
+      // "memory access out of bounds". Trimming 2 frames keeps it within bounds.
+      const cutMs = WL_FRAME_MS * 2;
+
       const ps = WL._PhraseSynthNew();
       if (!ps) return null;
       const reqPtr = WL._malloc(SYNTH_REQ_SIZE);
@@ -809,7 +816,7 @@
       sv(32,  0.0,           'double');
       sv(40,  durMs,         'double');
       sv(48,  conMs,         'double');
-      sv(56,  0.0,           'double');
+      sv(56,  cutMs,         'double');
       sv(64,  100.0,         'double');
       sv(72,  0.0,           'double');
       sv(80,  baseTempo,     'double');
@@ -823,7 +830,7 @@
       sv(116, 100,           'i32');
 
       // skip/fadeIn/fadeOut all 0 — crossfade is handled externally via GainNode
-      WL._PhraseSynthAddRequest(ps, reqPtr, posMs, 0.0, durMs, 0.0, 0.0, midiNote);
+      WL._PhraseSynthAddRequest(ps, reqPtr, posMs, 0.0, durMs, 0.0, 0.0, 0);
       WL._free(samplePtr);
       WL._free(reqPtr);
 

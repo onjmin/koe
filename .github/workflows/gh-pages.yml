@@ -35,10 +35,17 @@ jobs:
 
       - name: Assemble demo
         run: |
+          # /koe/ (root)
           cp demo/index.html              docs/index.html
           cp dist/index.js                docs/index.js
           cp dist/koe-worklet.js          docs/koe-worklet.js
           cp -r dist/world                docs/world
+          # /koe/demo/
+          mkdir -p                        docs/demo
+          cp demo/index.html              docs/demo/index.html
+          cp dist/index.js                docs/demo/index.js
+          cp dist/koe-worklet.js          docs/demo/koe-worklet.js
+          cp -r dist/world                docs/demo/world
 
       - name: Add .nojekyll
         run: touch ./docs/.nojekyll

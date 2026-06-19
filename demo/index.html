@@ -1029,16 +1029,17 @@
             fadeInEndAcT = startAcT + xfMs / 1000;
           }
 
-          // ── Deferred fade-out: apply it to the PREVIOUS note now that we know startAcT ──
+          // ── Deferred fade-out on the PREVIOUS note ──
+          // Each note's buffer is [leading silence of preMs][syllable ≈ durMs] and
+          // is placed at beatAt−preMs, so the syllable spans [beat, beat+dur] and the
+          // buffer ends right at the NEXT beat. Anchoring the fade-out at the next
+          // note's startAcT (= nextBeat − preMs, deep inside that silent lead-in) cut
+          // the previous syllable after only ~(dur−(pre−overlap)) ms — leaving the
+          // rest as silence (measured: 72% of the song went silent → choppy, "only
+          // vowels"). Always tail-fade prev at its NATURAL end instead; the buffers
+          // butt together at the beat for gapless legato.
           if (prevGain) {
-            const xfMs = Math.max(olMs, MIN_XF_MS); // use THIS note's overlap (shared window)
-            if (startAcT < prevEndAcT) {
-              // There is overlap — schedule fade-out on prev anchored at startAcT
-              scheduleFadeOut(prevGain, startAcT, xfMs, prevFadeInEnd);
-            } else {
-              // Gap between notes — tail-fade prev instead
-              scheduleFadeOut(prevGain, prevEndAcT - TAIL_FADE_MS / 1000, TAIL_FADE_MS, prevFadeInEnd);
-            }
+            scheduleFadeOut(prevGain, prevEndAcT - TAIL_FADE_MS / 1000, TAIL_FADE_MS, prevFadeInEnd);
           }
 
           src.start(startAcT);

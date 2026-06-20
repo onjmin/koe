@@ -55,9 +55,12 @@ type WorldlineFactory = (opts?: {
 }) => Promise<WorldlineWasm>;
 
 declare global {
-	// Injected by worldline.js when loaded as a classic <script>.
+	// Injected by worldline.js when loaded as a classic <script> or via importScripts.
 	// eslint-disable-next-line no-var
 	var WorldlineModule: WorldlineFactory | undefined;
+	// Present in classic Web Workers (used to load worldline.js off the main thread).
+	// eslint-disable-next-line no-var
+	var importScripts: ((...urls: string[]) => void) | undefined;
 }
 
 export interface WorldlineLoadOptions {
@@ -135,23 +138,37 @@ function loadWasm(scriptUrl: string): Promise<WorldlineWasm> {
 	const cached = moduleCache.get(scriptUrl);
 	if (cached) return cached;
 
-	if (typeof document === "undefined") {
-		return Promise.reject(
-			new Error(
-				"Worldline.load requires a DOM (browser) environment to load worldline.js",
-			),
-		);
-	}
-
 	const baseUrl = scriptUrl.slice(0, scriptUrl.lastIndexOf("/") + 1);
-	const promise = injectScript(scriptUrl).then(() => {
+	const instantiate = (): Promise<WorldlineWasm> => {
 		const factory = globalThis.WorldlineModule;
 		if (!factory)
 			throw new Error(
 				"worldline: WorldlineModule global was not defined by the script",
 			);
+		// locateFile resolves worldline.wasm next to the script; fetch works in both
+		// the DOM and Web Workers, so the WASM instantiates the same way off-thread.
 		return factory({ locateFile: (f: string) => baseUrl + f });
-	});
+	};
+
+	let promise: Promise<WorldlineWasm>;
+	if (typeof document !== "undefined") {
+		// Main thread / DOM: load worldline.js via a <script> tag.
+		promise = injectScript(scriptUrl).then(instantiate);
+	} else if (typeof globalThis.importScripts === "function") {
+		// Classic Web Worker: importScripts runs worldline.js synchronously in the
+		// worker's global scope, defining globalThis.WorldlineModule. This lets the
+		// heavy WORLD synthesis run off the main thread.
+		promise = Promise.resolve().then(() => {
+			(globalThis.importScripts as (...urls: string[]) => void)(scriptUrl);
+			return instantiate();
+		});
+	} else {
+		return Promise.reject(
+			new Error(
+				"Worldline.load requires a DOM or a classic Web Worker (importScripts) to load worldline.js",
+			),
+		);
+	}
 	moduleCache.set(scriptUrl, promise);
 	return promise;
 }
@@ -178,7 +195,13 @@ export class Worldline {
 
 	private constructor(private wasm: WorldlineWasm) {}
 
-	/** Load + instantiate the worldline WASM module (deduped per scriptUrl). */
+	/**
+	 * Load + instantiate the worldline WASM module (deduped per scriptUrl).
+	 *
+	 * Works on the main thread (loads via `<script>`) and inside a classic Web
+	 * Worker (loads via `importScripts`), so the heavy synthesis can run
+	 * off-thread. The matching `worldline.wasm` is fetched next to scriptUrl.
+	 */
 	static async load(options: WorldlineLoadOptions): Promise<Worldline> {
 		return new Worldline(await loadWasm(options.scriptUrl));
 	}

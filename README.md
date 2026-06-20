@@ -94,11 +94,13 @@ await fs.writeFile("voice.koe", buf);
 
 AudioWorklet を使った連接合成エンジン。`koe-worklet.js` を同じオリジンから配信する必要がある。
 
+GitHub Pages にホストされているファイルをそのまま使える:
+
 ```ts
 import { KoeEngine } from "@onjmin/koe";
 
 const engine = new KoeEngine({
-  workletUrl: "/koe-worklet.js", // dist/koe-worklet.js を配信する
+  workletUrl: "https://onjmin.github.io/koe/demo/koe-worklet.js",
 });
 
 // .koe ファイルをロード (Blob でも URL でも可)
@@ -163,11 +165,15 @@ bank.has("a"); // boolean
 
 OpenUtau の worldline WASM で F0 分析・再合成を行う。`worldline.js` と `worldline.wasm` を配信する必要がある。
 
+GitHub Pages にホストされているファイルをそのまま使える:
+
 ```ts
 import { VoiceBank, Worldline, leadInFromEntry } from "@onjmin/koe";
 
 const bank = await VoiceBank.load("/voice.koe");
-const wl   = await Worldline.load({ scriptUrl: "/world/worldline.js" });
+const wl   = await Worldline.load({
+  scriptUrl: "https://onjmin.github.io/koe/demo/world/worldline.js",
+});
 
 const alias = "a";
 const entry = bank.manifest.phonemes[alias];

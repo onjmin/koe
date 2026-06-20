@@ -2,7 +2,7 @@
   "author": "onjmin",
   "license": "MIT",
   "name": "@onjmin/koe",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "UTAU concatenative synthesis engine optimized for browser / mobile via WebAssembly + AudioWorklet",
   "type": "module",
   "main": "./dist/index.js",
@@ -29,9 +29,9 @@
     "lint": "biome check src",
     "lint2": "biome format src --write",
     "clean": "rimraf dist",
-		"prepublishOnly": "pnpm run build",
-		"patch": "pnpm version patch",
-		"publish-dangerous-dont-use-this-command": "pnpm publish --access public"
+    "prepublishOnly": "pnpm run build",
+    "patch": "pnpm version patch",
+    "publish-dangerous-dont-use-this-command": "pnpm publish --access public"
   },
   "keywords": [
     "utau",

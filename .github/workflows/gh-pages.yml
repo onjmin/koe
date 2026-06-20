@@ -40,7 +40,7 @@ jobs:
         run: |
           mkdir -p docs/demo
           cp demo/index.html docs/demo/index.html
-          cp dist/index.mjs docs/demo/index.mjs
+          cp dist/index.js docs/demo/index.js
 
       - name: Add .nojekyll
         run: touch ./docs/.nojekyll

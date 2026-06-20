@@ -49,8 +49,11 @@ var RangeVoiceSource = class {
   }
 };
 async function rangeFetch(url, start, length) {
-  const res = await fetch(url, { headers: { Range: `bytes=${start}-${start + length - 1}` } });
-  if (!res.ok && res.status !== 206) throw new Error(`.koe fetch failed: ${res.status}`);
+  const res = await fetch(url, {
+    headers: { Range: `bytes=${start}-${start + length - 1}` }
+  });
+  if (!res.ok && res.status !== 206)
+    throw new Error(`.koe fetch failed: ${res.status}`);
   return res.arrayBuffer();
 }
 var VoiceBank = class _VoiceBank {
@@ -70,13 +73,19 @@ var VoiceBank = class _VoiceBank {
       const { jsonLength: jsonLength2 } = parseKoeHeader(header2);
       const json2 = await rangeFetch(koe, 8, jsonLength2);
       const manifest2 = JSON.parse(new TextDecoder().decode(json2));
-      return new _VoiceBank(manifest2, new RangeVoiceSource(koe, pcmBase(jsonLength2)));
+      return new _VoiceBank(
+        manifest2,
+        new RangeVoiceSource(koe, pcmBase(jsonLength2))
+      );
     }
     const header = await koe.slice(0, 8).arrayBuffer();
     const { jsonLength } = parseKoeHeader(header);
     const json = await koe.slice(8, 8 + jsonLength).arrayBuffer();
     const manifest = JSON.parse(new TextDecoder().decode(json));
-    return new _VoiceBank(manifest, new BlobVoiceSource(koe, pcmBase(jsonLength)));
+    return new _VoiceBank(
+      manifest,
+      new BlobVoiceSource(koe, pcmBase(jsonLength))
+    );
   }
   /** True if the bank contains a phoneme under this alias. */
   has(phoneme) {
@@ -158,7 +167,9 @@ var KoeEngine = class {
     if (!this.bank || !this.node) return Promise.resolve();
     const load = this.bank.readPcmBytes(name).then((buf) => {
       if (!buf) return;
-      this.node.port.postMessage({ type: "phoneme", name, buffer: buf }, [buf]);
+      this.node.port.postMessage({ type: "phoneme", name, buffer: buf }, [
+        buf
+      ]);
       this.delivered.add(name);
       this.pending.delete(name);
     });
@@ -198,12 +209,17 @@ var SYNTH_REQ_SIZE = 120;
 var WL_FRAME_MS = 10;
 var samplesToMs = (samples) => samples / WORLDLINE_SAMPLE_RATE * 1e3;
 function leadInFromEntry(entry) {
-  return { preMs: samplesToMs(entry.pre || 0), consonantMs: samplesToMs(entry.consonant || 0) };
+  return {
+    preMs: samplesToMs(entry.pre || 0),
+    consonantMs: samplesToMs(entry.consonant || 0)
+  };
 }
 var moduleCache = /* @__PURE__ */ new Map();
 function injectScript(src) {
   return new Promise((resolve, reject) => {
-    const existing = document.querySelector(`script[data-koe-worldline="${src}"]`);
+    const existing = document.querySelector(
+      `script[data-koe-worldline="${src}"]`
+    );
     if (existing) {
       resolve();
       return;
@@ -221,13 +237,18 @@ function loadWasm(scriptUrl) {
   if (cached) return cached;
   if (typeof document === "undefined") {
     return Promise.reject(
-      new Error("Worldline.load requires a DOM (browser) environment to load worldline.js")
+      new Error(
+        "Worldline.load requires a DOM (browser) environment to load worldline.js"
+      )
     );
   }
   const baseUrl = scriptUrl.slice(0, scriptUrl.lastIndexOf("/") + 1);
   const promise = injectScript(scriptUrl).then(() => {
     const factory = globalThis.WorldlineModule;
-    if (!factory) throw new Error("worldline: WorldlineModule global was not defined by the script");
+    if (!factory)
+      throw new Error(
+        "worldline: WorldlineModule global was not defined by the script"
+      );
     return factory({ locateFile: (f) => baseUrl + f });
   });
   moduleCache.set(scriptUrl, promise);
@@ -331,7 +352,16 @@ var Worldline = class _Worldline {
     WL.HEAPF64.set(tArr, tPtr >> 3);
     WL.HEAPF64.set(bArr, bPtr >> 3);
     WL.HEAPF64.set(vArr, vPtr >> 3);
-    WL._PhraseSynthSetCurves(ps, f0Ptr, gPtr, tPtr, bPtr, vPtr, nFrames, WL_FRAME_MS);
+    WL._PhraseSynthSetCurves(
+      ps,
+      f0Ptr,
+      gPtr,
+      tPtr,
+      bPtr,
+      vPtr,
+      nFrames,
+      WL_FRAME_MS
+    );
     WL._free(f0Ptr);
     WL._free(gPtr);
     WL._free(tPtr);
@@ -435,7 +465,8 @@ function toMono(wav) {
   const out = new Float32Array(len);
   for (let i = 0; i < len; i++) {
     let sum = 0;
-    for (let c = 0; c < wav.channels; c++) sum += wav.samples[i * wav.channels + c];
+    for (let c = 0; c < wav.channels; c++)
+      sum += wav.samples[i * wav.channels + c];
     out[i] = sum / wav.channels;
   }
   return { sampleRate: wav.sampleRate, channels: 1, samples: out };
@@ -478,7 +509,15 @@ function readFourCC(view, pos) {
 
 // src/converter/pitch.ts
 var SAMPLE_RATE = 48e3;
-var NAME_SEMITONE = { c: 0, d: 2, e: 4, f: 5, g: 7, a: 9, b: 11 };
+var NAME_SEMITONE = {
+  c: 0,
+  d: 2,
+  e: 4,
+  f: 5,
+  g: 7,
+  a: 9,
+  b: 11
+};
 function noteNameToHz(name) {
   const m = /^([A-Ga-g])([#b]?)(-?\d+)$/.exec(name);
   if (!m) return null;
@@ -556,7 +595,11 @@ function trimToOto(pcm, oto, recordedPitch = 0) {
   const pre = clamp(msToSamples(oto.pre), 0, length);
   const overlap = clamp(msToSamples(oto.overlap), 0, length);
   const consonant = clamp(msToSamples(oto.consonant), 0, length);
-  const pitch = recordedPitch > 0 ? recordedPitch : detectF0(slice, Math.min(Math.max(pre, consonant), Math.max(0, length - 1)), length);
+  const pitch = recordedPitch > 0 ? recordedPitch : detectF0(
+    slice,
+    Math.min(Math.max(pre, consonant), Math.max(0, length - 1)),
+    length
+  );
   return {
     pcm: slice,
     entry: { length, pre, overlap, consonant, pitch }
@@ -577,7 +620,10 @@ function pack(inputs, referencePitch = 220) {
   const view = new Uint8Array(bin);
   let pos = 0;
   for (const chunk of chunks) {
-    view.set(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength), pos);
+    view.set(
+      new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength),
+      pos
+    );
     pos += chunk.byteLength;
   }
   const manifest = {

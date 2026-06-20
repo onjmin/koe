@@ -2,7 +2,7 @@
   "author": "onjmin",
   "license": "MIT",
   "name": "@onjmin/koe",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "UTAU concatenative synthesis engine optimized for browser / mobile via WebAssembly + AudioWorklet",
   "type": "module",
   "main": "./dist/index.js",

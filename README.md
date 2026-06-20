@@ -5,7 +5,7 @@
 UTAU の oto.ini で定義された音源を `.koe` アーカイブに変換し、WebAssembly + AudioWorklet でリアルタイム再生・高品質再合成を行う。
 
 - [DEMO](https://onjmin.github.io/koe/demo) koeフォーマット作成もこちらで
-- [npm](https://www.npmjs.com/package/@onjmin/dtm)
+- [npm](https://www.npmjs.com/package/@onjmin/koe)
 
 ---
 

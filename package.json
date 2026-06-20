@@ -39,7 +39,7 @@
     "audioworklet",
     "wasm"
   ],
-  "packageManager": "pnpm@10.17.1",
+  "packageManager": "pnpm@11.7.0",
   "devDependencies": {
     "@biomejs/biome": "2.5.0",
     "@hono/node-server": "2.0.5",

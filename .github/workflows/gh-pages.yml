@@ -33,8 +33,18 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Add .nojekyll
-        run: touch ./docs/.nojekyll
+      - name: Prepare publish directory
+        run: |
+          rm -rf docs
+          mkdir -p docs/demo/world
+          cp demo/index.html docs/demo/index.html
+          cp dist/index.js docs/demo/index.js
+          cp dist/index.d.ts docs/demo/index.d.ts
+          cp dist/koe-worklet.js docs/demo/koe-worklet.js
+          cp dist/world/worldline.js docs/demo/world/worldline.js
+          cp dist/world/worldline.wasm docs/demo/world/worldline.wasm
+          cp README.md docs/README.md
+          touch docs/.nojekyll
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3

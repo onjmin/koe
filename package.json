@@ -27,6 +27,7 @@
     "convert": "tsx src/converter/cli.ts",
     "typecheck": "tsc --noEmit",
     "lint": "biome check src",
+    "lint2": "biome format src --write",
     "clean": "rimraf dist",
 		"prepublishOnly": "pnpm run build",
 		"patch": "pnpm version patch",

@@ -235,22 +235,30 @@ function injectScript(src) {
 function loadWasm(scriptUrl) {
   const cached = moduleCache.get(scriptUrl);
   if (cached) return cached;
-  if (typeof document === "undefined") {
-    return Promise.reject(
-      new Error(
-        "Worldline.load requires a DOM (browser) environment to load worldline.js"
-      )
-    );
-  }
   const baseUrl = scriptUrl.slice(0, scriptUrl.lastIndexOf("/") + 1);
-  const promise = injectScript(scriptUrl).then(() => {
+  const instantiate = () => {
     const factory = globalThis.WorldlineModule;
     if (!factory)
       throw new Error(
         "worldline: WorldlineModule global was not defined by the script"
       );
     return factory({ locateFile: (f) => baseUrl + f });
-  });
+  };
+  let promise;
+  if (typeof document !== "undefined") {
+    promise = injectScript(scriptUrl).then(instantiate);
+  } else if (typeof globalThis.importScripts === "function") {
+    promise = Promise.resolve().then(() => {
+      globalThis.importScripts(scriptUrl);
+      return instantiate();
+    });
+  } else {
+    return Promise.reject(
+      new Error(
+        "Worldline.load requires a DOM or a classic Web Worker (importScripts) to load worldline.js"
+      )
+    );
+  }
   moduleCache.set(scriptUrl, promise);
   return promise;
 }
@@ -260,7 +268,13 @@ var Worldline = class _Worldline {
   }
   wasm;
   sampleRate = WORLDLINE_SAMPLE_RATE;
-  /** Load + instantiate the worldline WASM module (deduped per scriptUrl). */
+  /**
+   * Load + instantiate the worldline WASM module (deduped per scriptUrl).
+   *
+   * Works on the main thread (loads via `<script>`) and inside a classic Web
+   * Worker (loads via `importScripts`), so the heavy synthesis can run
+   * off-thread. The matching `worldline.wasm` is fetched next to scriptUrl.
+   */
   static async load(options) {
     return new _Worldline(await loadWasm(options.scriptUrl));
   }

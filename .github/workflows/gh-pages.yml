@@ -38,9 +38,12 @@ jobs:
 
       - name: Copy demo files
         run: |
-          mkdir -p docs/demo
+          mkdir -p docs/demo/world
           cp demo/index.html docs/demo/index.html
           cp dist/index.js docs/demo/index.js
+          cp dist/koe-worklet.js docs/demo/koe-worklet.js
+          cp dist/world/worldline.js docs/demo/world/worldline.js
+          cp dist/world/worldline.wasm docs/demo/world/worldline.wasm
 
       - name: Add .nojekyll
         run: touch ./docs/.nojekyll

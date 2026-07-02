@@ -11,6 +11,11 @@ interface VoiceSource {
 	readBytes(offset: number, length: number): Promise<ArrayBuffer>;
 }
 
+/** Hard ceiling on a single phoneme's PCM size (~10.5 MB / ~55s at 48kHz). */
+const MAX_PHONEME_SAMPLES = 5_242_880;
+/** Hard ceiling on the manifest JSON header itself. */
+const MAX_JSON_LENGTH = 50 * 1024 * 1024;
+
 class BlobVoiceSource implements VoiceSource {
 	constructor(
 		private blob: Blob,
@@ -29,13 +34,7 @@ class RangeVoiceSource implements VoiceSource {
 	) {}
 	async readBytes(offset: number, length: number): Promise<ArrayBuffer> {
 		const start = this.base + offset;
-		const res = await fetch(this.url, {
-			headers: { Range: `bytes=${start}-${start + length - 1}` },
-		});
-		if (!res.ok && res.status !== 206) {
-			throw new Error(`.koe range request failed: ${res.status}`);
-		}
-		return res.arrayBuffer();
+		return rangeFetch(this.url, start, length);
 	}
 }
 
@@ -46,10 +45,39 @@ async function rangeFetch(
 ): Promise<ArrayBuffer> {
 	const res = await fetch(url, {
 		headers: { Range: `bytes=${start}-${start + length - 1}` },
+		credentials: "omit", // never leak cookies / auth to a MML-supplied URL
 	});
-	if (!res.ok && res.status !== 206)
-		throw new Error(`.koe fetch failed: ${res.status}`);
+	// A server that ignores Range and returns 200 with the full file would
+	// blow past the requested size and exhaust memory; only accept 206.
+	if (res.status !== 206) {
+		throw new Error(
+			`.koe fetch failed: expected 206 Partial Content, got ${res.status}`,
+		);
+	}
 	return res.arrayBuffer();
+}
+
+function validateJsonLength(jsonLength: number): void {
+	if (
+		!Number.isInteger(jsonLength) ||
+		jsonLength < 0 ||
+		jsonLength > MAX_JSON_LENGTH
+	) {
+		throw new Error(`manifest JSON length out of bounds: ${jsonLength}`);
+	}
+}
+
+function parseManifest(json: ArrayBuffer): Manifest {
+	const manifest = JSON.parse(new TextDecoder().decode(json)) as Manifest;
+	if (
+		!manifest ||
+		typeof manifest !== "object" ||
+		typeof manifest.phonemes !== "object" ||
+		manifest.phonemes === null
+	) {
+		throw new Error("invalid manifest: missing phonemes table");
+	}
+	return manifest;
 }
 
 /**
@@ -77,24 +105,35 @@ export class VoiceBank {
 	 * @param koe a Blob/File of the .koe archive, or a URL (served with Range support)
 	 */
 	static async load(koe: Blob | string): Promise<VoiceBank> {
-		if (typeof koe === "string") {
-			const header = await rangeFetch(koe, 0, 8);
+		try {
+			if (typeof koe === "string") {
+				if (!/^(https?|blob):/i.test(koe)) {
+					throw new Error(`unsupported URL protocol: ${koe}`);
+				}
+				const header = await rangeFetch(koe, 0, 8);
+				const { jsonLength } = parseKoeHeader(header);
+				validateJsonLength(jsonLength);
+				const json = await rangeFetch(koe, 8, jsonLength);
+				const manifest = parseManifest(json);
+				return new VoiceBank(
+					manifest,
+					new RangeVoiceSource(koe, pcmBase(jsonLength)),
+				);
+			}
+			const header = await koe.slice(0, 8).arrayBuffer();
 			const { jsonLength } = parseKoeHeader(header);
-			const json = await rangeFetch(koe, 8, jsonLength);
-			const manifest = JSON.parse(new TextDecoder().decode(json)) as Manifest;
+			validateJsonLength(jsonLength);
+			const json = await koe.slice(8, 8 + jsonLength).arrayBuffer();
+			const manifest = parseManifest(json);
 			return new VoiceBank(
 				manifest,
-				new RangeVoiceSource(koe, pcmBase(jsonLength)),
+				new BlobVoiceSource(koe, pcmBase(jsonLength)),
+			);
+		} catch (error) {
+			throw new Error(
+				`Failed to load .koe voice bank: ${error instanceof Error ? error.message : String(error)}`,
 			);
 		}
-		const header = await koe.slice(0, 8).arrayBuffer();
-		const { jsonLength } = parseKoeHeader(header);
-		const json = await koe.slice(8, 8 + jsonLength).arrayBuffer();
-		const manifest = JSON.parse(new TextDecoder().decode(json)) as Manifest;
-		return new VoiceBank(
-			manifest,
-			new BlobVoiceSource(koe, pcmBase(jsonLength)),
-		);
 	}
 
 	/** True if the bank contains a phoneme under this alias. */
@@ -110,6 +149,15 @@ export class VoiceBank {
 	async readPcmBytes(phoneme: string): Promise<ArrayBuffer | null> {
 		const entry = this.manifest.phonemes[phoneme];
 		if (!entry) return null;
+		if (
+			!Number.isInteger(entry.offset) ||
+			!Number.isInteger(entry.length) ||
+			entry.offset < 0 ||
+			entry.length < 0 ||
+			entry.length > MAX_PHONEME_SAMPLES
+		) {
+			throw new Error(`manifest entry out of bounds for phoneme: ${phoneme}`);
+		}
 		return this.source.readBytes(entry.offset, entry.length * 2); // Int16 = 2 bytes/sample
 	}
 

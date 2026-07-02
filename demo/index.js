@@ -1,3 +1,282 @@
+// src/converter/frq.ts
+function parseFrqAverageF0(buffer) {
+  if (buffer.byteLength < 20) return null;
+  const view = new DataView(buffer);
+  let header = "";
+  for (let i = 0; i < 8; i++) header += String.fromCharCode(view.getUint8(i));
+  if (header !== "FREQ0003") return null;
+  const avg = view.getFloat64(12, true);
+  return Number.isFinite(avg) && avg > 0 ? avg : null;
+}
+function frqFileName(wavName) {
+  const dot = wavName.lastIndexOf(".");
+  const base = dot >= 0 ? wavName.slice(0, dot) : wavName;
+  const ext = dot >= 0 ? wavName.slice(dot + 1) : "wav";
+  return `${base}_${ext}.frq`;
+}
+
+// src/converter/pitch.ts
+var SAMPLE_RATE = 48e3;
+var NAME_SEMITONE = {
+  c: 0,
+  d: 2,
+  e: 4,
+  f: 5,
+  g: 7,
+  a: 9,
+  b: 11
+};
+function noteNameToHz(name) {
+  const m = /^([A-Ga-g])([#b]?)(-?\d+)$/.exec(name);
+  if (!m) return null;
+  let semi = NAME_SEMITONE[m[1].toLowerCase()];
+  if (m[2] === "#") semi++;
+  else if (m[2] === "b") semi--;
+  const midi = (parseInt(m[3], 10) + 1) * 12 + semi;
+  return 440 * 2 ** ((midi - 69) / 12);
+}
+function pitchFromAliasSuffix(alias) {
+  const m = /_([A-Ga-g][#b]?-?\d+)$/.exec(alias);
+  return m ? noteNameToHz(m[1]) : null;
+}
+function detectF0(pcm, start, end) {
+  const DECIM = 4;
+  const sr = SAMPLE_RATE / DECIM;
+  const minLag = Math.floor(sr / 700);
+  const maxLag = Math.floor(sr / 70);
+  const outLen = Math.floor((end - start) / DECIM);
+  if (outLen < maxLag + 2) return 0;
+  const win = Math.min(outLen, 1500);
+  const buf = new Float32Array(win);
+  let mean = 0;
+  for (let i = 0; i < win; i++) {
+    let s = 0;
+    const base = start + i * DECIM;
+    for (let j = 0; j < DECIM; j++) s += pcm[base + j];
+    buf[i] = s;
+    mean += s;
+  }
+  mean /= win;
+  const sq = new Float64Array(win + 1);
+  for (let i = 0; i < win; i++) {
+    buf[i] -= mean;
+    sq[i + 1] = sq[i] + buf[i] * buf[i];
+  }
+  if (sq[win] < 1) return 0;
+  const norm = (lag) => {
+    const n = win - lag;
+    let r = 0;
+    for (let i = 0; i < n; i++) r += buf[i] * buf[i + lag];
+    const e = sq[n] + (sq[lag + n] - sq[lag]);
+    return e > 0 ? 2 * r / e : 0;
+  };
+  let bestLag = -1;
+  let best = 0;
+  for (let lag = minLag; lag <= maxLag; lag++) {
+    const v = norm(lag);
+    if (v > best) {
+      best = v;
+      bestLag = lag;
+    }
+  }
+  if (bestLag < 1 || best < 0.4) return 0;
+  const y0 = norm(bestLag - 1);
+  const y1 = best;
+  const y2 = norm(bestLag + 1);
+  const denom = y0 - 2 * y1 + y2;
+  const shift = denom !== 0 ? 0.5 * (y0 - y2) / denom : 0;
+  return sr / (bestLag + shift);
+}
+
+// src/converter/pack.ts
+var TARGET_RATE = 48e3;
+function msToSamples(ms) {
+  return Math.round(ms / 1e3 * TARGET_RATE);
+}
+var clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+function trimToOto(pcm, oto, recordedPitch = 0) {
+  const full = pcm.length;
+  const start = clamp(msToSamples(oto.offset), 0, full);
+  const end = oto.cutoff < 0 ? clamp(start + msToSamples(-oto.cutoff), start, full) : clamp(full - msToSamples(oto.cutoff), start, full);
+  const slice = pcm.subarray(start, end);
+  const length = slice.length;
+  const pre = clamp(msToSamples(oto.pre), 0, length);
+  const overlap = clamp(msToSamples(oto.overlap), 0, length);
+  const consonant = clamp(msToSamples(oto.consonant), 0, length);
+  const pitch = recordedPitch > 0 ? recordedPitch : detectF0(
+    slice,
+    Math.min(Math.max(pre, consonant), Math.max(0, length - 1)),
+    length
+  );
+  return {
+    pcm: slice,
+    entry: { length, pre, overlap, consonant, pitch }
+  };
+}
+function pack(inputs, referencePitch = 220) {
+  const phonemes = {};
+  const chunks = [];
+  let byteOffset = 0;
+  for (const { oto, pcm, recordedPitch } of inputs) {
+    const { pcm: slice, entry } = trimToOto(pcm, oto, recordedPitch);
+    if (slice.length === 0) continue;
+    phonemes[oto.alias] = { offset: byteOffset, ...entry };
+    byteOffset += slice.byteLength;
+    chunks.push(slice);
+  }
+  const bin = new ArrayBuffer(byteOffset);
+  const view = new Uint8Array(bin);
+  let pos = 0;
+  for (const chunk of chunks) {
+    view.set(
+      new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength),
+      pos
+    );
+    pos += chunk.byteLength;
+  }
+  const manifest = {
+    sampleRate: 48e3,
+    referencePitch,
+    phonemes
+  };
+  return { manifest, bin };
+}
+
+// src/converter/parse-oto.ts
+function parseOto(content) {
+  const entries = [];
+  for (const raw of content.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq === -1) continue;
+    const wav = line.slice(0, eq).trim();
+    const parts = line.slice(eq + 1).split(",");
+    if (parts.length < 6) continue;
+    const [alias, offsetStr, consonantStr, cutoffStr, preStr, overlapStr] = parts;
+    const aliasStr = alias.trim() || wav.replace(/\.[^.]+$/, "");
+    const entry = {
+      wav,
+      alias: aliasStr,
+      offset: parseFloat(offsetStr) || 0,
+      consonant: parseFloat(consonantStr) || 0,
+      cutoff: parseFloat(cutoffStr) || 0,
+      pre: parseFloat(preStr) || 0,
+      overlap: parseFloat(overlapStr) || 0
+    };
+    if (!entry.alias) continue;
+    entries.push(entry);
+  }
+  return entries;
+}
+
+// src/converter/wav.ts
+function parseWav(buf) {
+  const view = new DataView(buf);
+  const riff = readFourCC(view, 0);
+  if (riff !== "RIFF") throw new Error(`Not a RIFF file (got "${riff}")`);
+  let sampleRate = 0;
+  let channels = 0;
+  let bitsPerSample = 0;
+  let audioFormat = 1;
+  let dataOffset = 0;
+  let dataLength = 0;
+  let pos = 12;
+  while (pos < view.byteLength - 8) {
+    const id = readFourCC(view, pos);
+    const size = view.getUint32(pos + 4, true);
+    pos += 8;
+    if (id === "fmt ") {
+      audioFormat = view.getUint16(pos, true);
+      channels = view.getUint16(pos + 2, true);
+      sampleRate = view.getUint32(pos + 4, true);
+      bitsPerSample = view.getUint16(pos + 14, true);
+      if (audioFormat === 65534 && size >= 40) {
+        audioFormat = view.getUint16(pos + 24, true);
+      }
+    } else if (id === "data") {
+      dataOffset = pos;
+      dataLength = Math.min(size, view.byteLength - pos);
+      break;
+    }
+    pos += size + (size & 1);
+  }
+  if (!dataOffset) throw new Error("WAV has no data chunk");
+  if (!channels || !sampleRate) throw new Error("WAV fmt chunk missing");
+  const supported = audioFormat === 3 && bitsPerSample === 32 || audioFormat === 1 && (bitsPerSample === 8 || bitsPerSample === 16 || bitsPerSample === 24);
+  if (!supported) {
+    throw new Error(
+      `Unsupported WAV format ${audioFormat} / ${bitsPerSample}-bit (need PCM 8/16/24-bit or IEEE float 32-bit)`
+    );
+  }
+  const bytesPerSample = bitsPerSample >> 3;
+  const totalSamples = Math.floor(dataLength / bytesPerSample);
+  const samples = new Float32Array(totalSamples);
+  for (let i = 0; i < totalSamples; i++) {
+    const p = dataOffset + i * bytesPerSample;
+    if (audioFormat === 3) {
+      samples[i] = view.getFloat32(p, true);
+    } else if (bitsPerSample === 8) {
+      samples[i] = (view.getUint8(p) - 128) / 128;
+    } else if (bitsPerSample === 16) {
+      samples[i] = view.getInt16(p, true) / 32768;
+    } else if (bitsPerSample === 24) {
+      const lo = view.getUint8(p) | view.getUint8(p + 1) << 8;
+      let hi = view.getUint8(p + 2);
+      if (hi & 128) hi = hi | 4294967040;
+      samples[i] = (hi << 16 | lo) / 8388608;
+    }
+  }
+  return { sampleRate, channels, samples };
+}
+function toMono(wav) {
+  if (wav.channels === 1) return wav;
+  const len = wav.samples.length / wav.channels;
+  const out = new Float32Array(len);
+  for (let i = 0; i < len; i++) {
+    let sum = 0;
+    for (let c = 0; c < wav.channels; c++)
+      sum += wav.samples[i * wav.channels + c];
+    out[i] = sum / wav.channels;
+  }
+  return { sampleRate: wav.sampleRate, channels: 1, samples: out };
+}
+function resample(wav, targetRate) {
+  if (wav.sampleRate === targetRate) return wav;
+  const ratio = wav.sampleRate / targetRate;
+  const outLen = Math.floor(wav.samples.length / ratio);
+  const out = new Float32Array(outLen);
+  const src = wav.samples;
+  for (let i = 0; i < outLen; i++) {
+    const x = i * ratio;
+    const xi = Math.floor(x);
+    const frac = x - xi;
+    out[i] = (src[xi] ?? 0) + ((src[xi + 1] ?? 0) - (src[xi] ?? 0)) * frac;
+  }
+  return { sampleRate: targetRate, channels: 1, samples: out };
+}
+function toInt16(samples) {
+  const out = new Int16Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    out[i] = Math.round(Math.max(-1, Math.min(1, samples[i])) * 32767);
+  }
+  return out;
+}
+function normalizePcm(buf) {
+  const wav = parseWav(buf);
+  const mono = toMono(wav);
+  const resampled = resample(mono, 48e3);
+  return toInt16(resampled.samples);
+}
+function readFourCC(view, pos) {
+  return String.fromCharCode(
+    view.getUint8(pos),
+    view.getUint8(pos + 1),
+    view.getUint8(pos + 2),
+    view.getUint8(pos + 3)
+  );
+}
+
 // src/koe.ts
 var MAGIC = 1263486208;
 function packKoe(manifest, pcmParts) {
@@ -18,6 +297,8 @@ function parseKoeHeader(headerBytes) {
 var pcmBase = (jsonLength) => 8 + jsonLength;
 
 // src/engine/voice-bank.ts
+var MAX_PHONEME_SAMPLES = 5242880;
+var MAX_JSON_LENGTH = 50 * 1024 * 1024;
 var BlobVoiceSource = class {
   constructor(blob, base) {
     this.blob = blob;
@@ -39,22 +320,60 @@ var RangeVoiceSource = class {
   base;
   async readBytes(offset, length) {
     const start = this.base + offset;
-    const res = await fetch(this.url, {
-      headers: { Range: `bytes=${start}-${start + length - 1}` }
-    });
-    if (!res.ok && res.status !== 206) {
-      throw new Error(`.koe range request failed: ${res.status}`);
-    }
-    return res.arrayBuffer();
+    return rangeFetch(this.url, start, length);
   }
 };
 async function rangeFetch(url, start, length) {
   const res = await fetch(url, {
-    headers: { Range: `bytes=${start}-${start + length - 1}` }
+    headers: { Range: `bytes=${start}-${start + length - 1}` },
+    credentials: "omit"
+    // never leak cookies / auth to a MML-supplied URL
   });
-  if (!res.ok && res.status !== 206)
-    throw new Error(`.koe fetch failed: ${res.status}`);
-  return res.arrayBuffer();
+  if (res.status !== 206) {
+    throw new Error(
+      `.koe fetch failed: expected 206 Partial Content, got ${res.status}`
+    );
+  }
+  return readCapped(res, length);
+}
+async function readCapped(res, length) {
+  const reader = res.body?.getReader();
+  if (!reader) {
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength > length) {
+      throw new Error(
+        `.koe fetch failed: response exceeds requested ${length} bytes`
+      );
+    }
+    return buf;
+  }
+  const out = new Uint8Array(length);
+  let received = 0;
+  for (; ; ) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (received + value.byteLength > length) {
+      await reader.cancel();
+      throw new Error(
+        `.koe fetch failed: response exceeds requested ${length} bytes`
+      );
+    }
+    out.set(value, received);
+    received += value.byteLength;
+  }
+  return received === length ? out.buffer : out.buffer.slice(0, received);
+}
+function validateJsonLength(jsonLength) {
+  if (!Number.isInteger(jsonLength) || jsonLength < 0 || jsonLength > MAX_JSON_LENGTH) {
+    throw new Error(`manifest JSON length out of bounds: ${jsonLength}`);
+  }
+}
+function parseManifest(json) {
+  const manifest = JSON.parse(new TextDecoder().decode(json));
+  if (!manifest || typeof manifest !== "object" || typeof manifest.phonemes !== "object" || manifest.phonemes === null) {
+    throw new Error("invalid manifest: missing phonemes table");
+  }
+  return manifest;
 }
 var VoiceBank = class _VoiceBank {
   constructor(manifest, source) {
@@ -68,20 +387,41 @@ var VoiceBank = class _VoiceBank {
    * @param koe a Blob/File of the .koe archive, or a URL (served with Range support)
    */
   static async load(koe) {
-    if (typeof koe === "string") {
-      const header2 = await rangeFetch(koe, 0, 8);
-      const { jsonLength: jsonLength2 } = parseKoeHeader(header2);
-      const json2 = await rangeFetch(koe, 8, jsonLength2);
-      const manifest2 = JSON.parse(new TextDecoder().decode(json2));
-      return new _VoiceBank(
-        manifest2,
-        new RangeVoiceSource(koe, pcmBase(jsonLength2))
+    try {
+      if (typeof koe === "string") {
+        if (/^blob:/i.test(koe)) {
+          const res = await fetch(koe);
+          if (!res.ok) {
+            throw new Error(`blob: URL fetch failed: ${res.status}`);
+          }
+          return await _VoiceBank.fromBlob(await res.blob());
+        }
+        if (!/^https?:/i.test(koe)) {
+          throw new Error(`unsupported URL protocol: ${koe}`);
+        }
+        const header = await rangeFetch(koe, 0, 8);
+        const { jsonLength } = parseKoeHeader(header);
+        validateJsonLength(jsonLength);
+        const json = await rangeFetch(koe, 8, jsonLength);
+        const manifest = parseManifest(json);
+        return new _VoiceBank(
+          manifest,
+          new RangeVoiceSource(koe, pcmBase(jsonLength))
+        );
+      }
+      return await _VoiceBank.fromBlob(koe);
+    } catch (error) {
+      throw new Error(
+        `Failed to load .koe voice bank: ${error instanceof Error ? error.message : String(error)}`
       );
     }
+  }
+  static async fromBlob(koe) {
     const header = await koe.slice(0, 8).arrayBuffer();
     const { jsonLength } = parseKoeHeader(header);
+    validateJsonLength(jsonLength);
     const json = await koe.slice(8, 8 + jsonLength).arrayBuffer();
-    const manifest = JSON.parse(new TextDecoder().decode(json));
+    const manifest = parseManifest(json);
     return new _VoiceBank(
       manifest,
       new BlobVoiceSource(koe, pcmBase(jsonLength))
@@ -89,7 +429,7 @@ var VoiceBank = class _VoiceBank {
   }
   /** True if the bank contains a phoneme under this alias. */
   has(phoneme) {
-    return this.manifest.phonemes[phoneme] !== void 0;
+    return Object.hasOwn(this.manifest.phonemes, phoneme);
   }
   /**
    * Raw Int16 PCM bytes (48 kHz / mono) for a phoneme, or null if unknown.
@@ -97,8 +437,11 @@ var VoiceBank = class _VoiceBank {
    * worker / AudioWorklet.
    */
   async readPcmBytes(phoneme) {
+    if (!Object.hasOwn(this.manifest.phonemes, phoneme)) return null;
     const entry = this.manifest.phonemes[phoneme];
-    if (!entry) return null;
+    if (!Number.isInteger(entry.offset) || !Number.isInteger(entry.length) || entry.offset < 0 || entry.length < 0 || entry.length > MAX_PHONEME_SAMPLES) {
+      throw new Error(`manifest entry out of bounds for phoneme: ${phoneme}`);
+    }
     return this.source.readBytes(entry.offset, entry.length * 2);
   }
   /**
@@ -108,7 +451,7 @@ var VoiceBank = class _VoiceBank {
   async getPcm(phoneme) {
     const buf = await this.readPcmBytes(phoneme);
     if (!buf) return null;
-    const int16 = new Int16Array(buf);
+    const int16 = new Int16Array(buf, 0, Math.floor(buf.byteLength / 2));
     const f64 = new Float64Array(int16.length);
     for (let i = 0; i < int16.length; i++) f64[i] = int16[i] / 32768;
     return f64;
@@ -143,6 +486,8 @@ var KoeEngine = class {
    */
   async load(koe) {
     await this.ctx.audioWorklet.addModule(this.workletUrl);
+    this.node?.disconnect();
+    this.node = null;
     this.bank = await VoiceBank.load(koe);
     this.delivered.clear();
     this.pending.clear();
@@ -166,11 +511,12 @@ var KoeEngine = class {
     if (existing) return existing;
     if (!this.bank || !this.node) return Promise.resolve();
     const load = this.bank.readPcmBytes(name).then((buf) => {
-      if (!buf) return;
+      if (!buf || !this.node) return;
       this.node.port.postMessage({ type: "phoneme", name, buffer: buf }, [
         buf
       ]);
       this.delivered.add(name);
+    }).finally(() => {
       this.pending.delete(name);
     });
     this.pending.set(name, load);
@@ -191,6 +537,18 @@ var KoeEngine = class {
   /** Resume the AudioContext if suspended (e.g. after autoplay block). */
   async resume() {
     if (this.ctx.state === "suspended") await this.ctx.resume();
+  }
+  /**
+   * Tear down the worklet node and close the AudioContext, releasing the audio
+   * hardware. The engine cannot be reused afterwards — create a new one.
+   */
+  async dispose() {
+    this.node?.disconnect();
+    this.node = null;
+    this.bank = null;
+    this.delivered.clear();
+    this.pending.clear();
+    if (this.ctx.state !== "closed") await this.ctx.close();
   }
   /**
    * Read a phoneme's raw PCM and return it as a Float64Array normalised to
@@ -388,282 +746,13 @@ var Worldline = class _Worldline {
     }
     const outLen = WL._PhraseSynthSynth(ps, yPtrPtr, 0);
     const yPtr = WL.getValue(yPtrPtr, "*");
-    const audio = outLen > 0 ? new Float32Array(WL.HEAPF32.buffer, yPtr, outLen).slice() : null;
+    const audio = outLen > 0 && yPtr ? new Float32Array(WL.HEAPF32.buffer, yPtr, outLen).slice() : null;
+    if (yPtr) WL._free(yPtr);
     WL._free(yPtrPtr);
     WL._PhraseSynthDelete(ps);
     return audio;
   }
 };
-
-// src/converter/parse-oto.ts
-function parseOto(content) {
-  const entries = [];
-  for (const raw of content.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
-    if (eq === -1) continue;
-    const wav = line.slice(0, eq).trim();
-    const parts = line.slice(eq + 1).split(",");
-    if (parts.length < 6) continue;
-    const [alias, offsetStr, consonantStr, cutoffStr, preStr, overlapStr] = parts;
-    const aliasStr = alias.trim() || wav.replace(/\.[^.]+$/, "");
-    const entry = {
-      wav,
-      alias: aliasStr,
-      offset: parseFloat(offsetStr) || 0,
-      consonant: parseFloat(consonantStr) || 0,
-      cutoff: parseFloat(cutoffStr) || 0,
-      pre: parseFloat(preStr) || 0,
-      overlap: parseFloat(overlapStr) || 0
-    };
-    if (!entry.alias) continue;
-    entries.push(entry);
-  }
-  return entries;
-}
-
-// src/converter/wav.ts
-function parseWav(buf) {
-  const view = new DataView(buf);
-  const riff = readFourCC(view, 0);
-  if (riff !== "RIFF") throw new Error(`Not a RIFF file (got "${riff}")`);
-  let sampleRate = 0;
-  let channels = 0;
-  let bitsPerSample = 0;
-  let audioFormat = 1;
-  let dataOffset = 0;
-  let dataLength = 0;
-  let pos = 12;
-  while (pos < view.byteLength - 8) {
-    const id = readFourCC(view, pos);
-    const size = view.getUint32(pos + 4, true);
-    pos += 8;
-    if (id === "fmt ") {
-      audioFormat = view.getUint16(pos, true);
-      channels = view.getUint16(pos + 2, true);
-      sampleRate = view.getUint32(pos + 4, true);
-      bitsPerSample = view.getUint16(pos + 14, true);
-    } else if (id === "data") {
-      dataOffset = pos;
-      dataLength = size;
-      break;
-    }
-    pos += size + (size & 1);
-  }
-  if (!dataOffset) throw new Error("WAV has no data chunk");
-  if (!channels || !sampleRate) throw new Error("WAV fmt chunk missing");
-  const bytesPerSample = bitsPerSample >> 3;
-  const totalSamples = Math.floor(dataLength / bytesPerSample);
-  const samples = new Float32Array(totalSamples);
-  for (let i = 0; i < totalSamples; i++) {
-    const p = dataOffset + i * bytesPerSample;
-    if (audioFormat === 3) {
-      samples[i] = view.getFloat32(p, true);
-    } else if (bitsPerSample === 8) {
-      samples[i] = (view.getUint8(p) - 128) / 128;
-    } else if (bitsPerSample === 16) {
-      samples[i] = view.getInt16(p, true) / 32768;
-    } else if (bitsPerSample === 24) {
-      const lo = view.getUint8(p) | view.getUint8(p + 1) << 8;
-      let hi = view.getUint8(p + 2);
-      if (hi & 128) hi = hi | 4294967040;
-      samples[i] = (hi << 16 | lo) / 8388608;
-    }
-  }
-  return { sampleRate, channels, samples };
-}
-function toMono(wav) {
-  if (wav.channels === 1) return wav;
-  const len = wav.samples.length / wav.channels;
-  const out = new Float32Array(len);
-  for (let i = 0; i < len; i++) {
-    let sum = 0;
-    for (let c = 0; c < wav.channels; c++)
-      sum += wav.samples[i * wav.channels + c];
-    out[i] = sum / wav.channels;
-  }
-  return { sampleRate: wav.sampleRate, channels: 1, samples: out };
-}
-function resample(wav, targetRate) {
-  if (wav.sampleRate === targetRate) return wav;
-  const ratio = wav.sampleRate / targetRate;
-  const outLen = Math.floor(wav.samples.length / ratio);
-  const out = new Float32Array(outLen);
-  const src = wav.samples;
-  for (let i = 0; i < outLen; i++) {
-    const x = i * ratio;
-    const xi = Math.floor(x);
-    const frac = x - xi;
-    out[i] = (src[xi] ?? 0) + ((src[xi + 1] ?? 0) - (src[xi] ?? 0)) * frac;
-  }
-  return { sampleRate: targetRate, channels: 1, samples: out };
-}
-function toInt16(samples) {
-  const out = new Int16Array(samples.length);
-  for (let i = 0; i < samples.length; i++) {
-    out[i] = Math.round(Math.max(-1, Math.min(1, samples[i])) * 32767);
-  }
-  return out;
-}
-function normalizePcm(buf) {
-  const wav = parseWav(buf);
-  const mono = toMono(wav);
-  const resampled = resample(mono, 48e3);
-  return toInt16(resampled.samples);
-}
-function readFourCC(view, pos) {
-  return String.fromCharCode(
-    view.getUint8(pos),
-    view.getUint8(pos + 1),
-    view.getUint8(pos + 2),
-    view.getUint8(pos + 3)
-  );
-}
-
-// src/converter/pitch.ts
-var SAMPLE_RATE = 48e3;
-var NAME_SEMITONE = {
-  c: 0,
-  d: 2,
-  e: 4,
-  f: 5,
-  g: 7,
-  a: 9,
-  b: 11
-};
-function noteNameToHz(name) {
-  const m = /^([A-Ga-g])([#b]?)(-?\d+)$/.exec(name);
-  if (!m) return null;
-  let semi = NAME_SEMITONE[m[1].toLowerCase()];
-  if (m[2] === "#") semi++;
-  else if (m[2] === "b") semi--;
-  const midi = (parseInt(m[3], 10) + 1) * 12 + semi;
-  return 440 * 2 ** ((midi - 69) / 12);
-}
-function pitchFromAliasSuffix(alias) {
-  const m = /_([A-Ga-g][#b]?-?\d+)$/.exec(alias);
-  return m ? noteNameToHz(m[1]) : null;
-}
-function detectF0(pcm, start, end) {
-  const DECIM = 4;
-  const sr = SAMPLE_RATE / DECIM;
-  const minLag = Math.floor(sr / 700);
-  const maxLag = Math.floor(sr / 70);
-  const outLen = Math.floor((end - start) / DECIM);
-  if (outLen < maxLag + 2) return 0;
-  const win = Math.min(outLen, 1500);
-  const buf = new Float32Array(win);
-  let mean = 0;
-  for (let i = 0; i < win; i++) {
-    let s = 0;
-    const base = start + i * DECIM;
-    for (let j = 0; j < DECIM; j++) s += pcm[base + j];
-    buf[i] = s;
-    mean += s;
-  }
-  mean /= win;
-  const sq = new Float64Array(win + 1);
-  for (let i = 0; i < win; i++) {
-    buf[i] -= mean;
-    sq[i + 1] = sq[i] + buf[i] * buf[i];
-  }
-  if (sq[win] < 1) return 0;
-  const norm = (lag) => {
-    const n = win - lag;
-    let r = 0;
-    for (let i = 0; i < n; i++) r += buf[i] * buf[i + lag];
-    const e = sq[n] + (sq[lag + n] - sq[lag]);
-    return e > 0 ? 2 * r / e : 0;
-  };
-  let bestLag = -1;
-  let best = 0;
-  for (let lag = minLag; lag <= maxLag; lag++) {
-    const v = norm(lag);
-    if (v > best) {
-      best = v;
-      bestLag = lag;
-    }
-  }
-  if (bestLag < 1 || best < 0.4) return 0;
-  const y0 = norm(bestLag - 1);
-  const y1 = best;
-  const y2 = norm(bestLag + 1);
-  const denom = y0 - 2 * y1 + y2;
-  const shift = denom !== 0 ? 0.5 * (y0 - y2) / denom : 0;
-  return sr / (bestLag + shift);
-}
-
-// src/converter/pack.ts
-var TARGET_RATE = 48e3;
-function msToSamples(ms) {
-  return Math.round(ms / 1e3 * TARGET_RATE);
-}
-var clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
-function trimToOto(pcm, oto, recordedPitch = 0) {
-  const full = pcm.length;
-  const start = clamp(msToSamples(oto.offset), 0, full);
-  const end = oto.cutoff < 0 ? clamp(start + msToSamples(-oto.cutoff), start, full) : clamp(full - msToSamples(oto.cutoff), start, full);
-  const slice = pcm.subarray(start, end);
-  const length = slice.length;
-  const pre = clamp(msToSamples(oto.pre), 0, length);
-  const overlap = clamp(msToSamples(oto.overlap), 0, length);
-  const consonant = clamp(msToSamples(oto.consonant), 0, length);
-  const pitch = recordedPitch > 0 ? recordedPitch : detectF0(
-    slice,
-    Math.min(Math.max(pre, consonant), Math.max(0, length - 1)),
-    length
-  );
-  return {
-    pcm: slice,
-    entry: { length, pre, overlap, consonant, pitch }
-  };
-}
-function pack(inputs, referencePitch = 220) {
-  const phonemes = {};
-  const chunks = [];
-  let byteOffset = 0;
-  for (const { oto, pcm, recordedPitch } of inputs) {
-    const { pcm: slice, entry } = trimToOto(pcm, oto, recordedPitch);
-    if (slice.length === 0) continue;
-    phonemes[oto.alias] = { offset: byteOffset, ...entry };
-    byteOffset += slice.byteLength;
-    chunks.push(slice);
-  }
-  const bin = new ArrayBuffer(byteOffset);
-  const view = new Uint8Array(bin);
-  let pos = 0;
-  for (const chunk of chunks) {
-    view.set(
-      new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength),
-      pos
-    );
-    pos += chunk.byteLength;
-  }
-  const manifest = {
-    sampleRate: 48e3,
-    referencePitch,
-    phonemes
-  };
-  return { manifest, bin };
-}
-
-// src/converter/frq.ts
-function parseFrqAverageF0(buffer) {
-  if (buffer.byteLength < 20) return null;
-  const view = new DataView(buffer);
-  let header = "";
-  for (let i = 0; i < 8; i++) header += String.fromCharCode(view.getUint8(i));
-  if (header !== "FREQ0003") return null;
-  const avg = view.getFloat64(12, true);
-  return Number.isFinite(avg) && avg > 0 ? avg : null;
-}
-function frqFileName(wavName) {
-  const dot = wavName.lastIndexOf(".");
-  const base = dot >= 0 ? wavName.slice(0, dot) : wavName;
-  const ext = dot >= 0 ? wavName.slice(dot + 1) : "wav";
-  return `${base}_${ext}.frq`;
-}
 export {
   KoeEngine,
   MIN_WORLDLINE_SAMPLES,

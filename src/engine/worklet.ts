@@ -98,7 +98,11 @@ class KoeProcessor extends AudioWorkletProcessor {
 		if (msg.type === "init" && msg.manifest) {
 			this.manifest = msg.manifest;
 		} else if (msg.type === "phoneme" && msg.name && msg.buffer) {
-			this.phonemes.set(msg.name, new Int16Array(msg.buffer));
+			// Floor to whole samples — Int16Array(buffer) throws on odd byte counts.
+			this.phonemes.set(
+				msg.name,
+				new Int16Array(msg.buffer, 0, Math.floor(msg.buffer.byteLength / 2)),
+			);
 		} else if (msg.type === "play" && msg.notes) {
 			this.queue.push(...msg.notes);
 		} else if (msg.type === "stop") {
@@ -126,7 +130,11 @@ class KoeProcessor extends AudioWorkletProcessor {
 			};
 		}
 
-		const entry = this.manifest.phonemes[note.phoneme];
+		// Own-property check: a plain [phoneme] access would also match inherited
+		// Object.prototype keys like "toString" / "constructor".
+		const entry = Object.hasOwn(this.manifest.phonemes, note.phoneme)
+			? this.manifest.phonemes[note.phoneme]
+			: undefined;
 		const data = this.phonemes.get(note.phoneme);
 		// Skip notes whose PCM hasn't been delivered yet
 		if (!entry || !data) return null;

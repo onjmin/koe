@@ -333,9 +333,12 @@ export class Worldline {
 		const outLen = WL._PhraseSynthSynth(ps, yPtrPtr, 0);
 		const yPtr = WL.getValue(yPtrPtr, "*");
 		const audio =
-			outLen > 0
+			outLen > 0 && yPtr
 				? new Float32Array(WL.HEAPF32.buffer, yPtr, outLen).slice()
 				: null;
+		// The wrapper allocates *y with `new float[]` for the caller to release;
+		// Emscripten's operator new is malloc-backed, so _free reclaims it.
+		if (yPtr) WL._free(yPtr);
 		WL._free(yPtrPtr);
 		WL._PhraseSynthDelete(ps);
 		return audio;

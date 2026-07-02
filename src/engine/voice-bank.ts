@@ -1,5 +1,5 @@
-import type { Manifest } from "../types.js";
 import { parseKoeHeader, pcmBase } from "../koe.js";
+import type { Manifest } from "../types.js";
 
 /**
  * Supplies raw bytes from the PCM section of a .koe archive on demand.
@@ -54,7 +54,40 @@ async function rangeFetch(
 			`.koe fetch failed: expected 206 Partial Content, got ${res.status}`,
 		);
 	}
-	return res.arrayBuffer();
+	return readCapped(res, length);
+}
+
+/**
+ * Read a response body without trusting its declared size: a server can answer
+ * 206 yet still stream an oversized body. Abort as soon as the read exceeds
+ * the requested byte count, before buffering the excess.
+ */
+async function readCapped(res: Response, length: number): Promise<ArrayBuffer> {
+	const reader = res.body?.getReader();
+	if (!reader) {
+		const buf = await res.arrayBuffer();
+		if (buf.byteLength > length) {
+			throw new Error(
+				`.koe fetch failed: response exceeds requested ${length} bytes`,
+			);
+		}
+		return buf;
+	}
+	const out = new Uint8Array(length);
+	let received = 0;
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		if (received + value.byteLength > length) {
+			await reader.cancel();
+			throw new Error(
+				`.koe fetch failed: response exceeds requested ${length} bytes`,
+			);
+		}
+		out.set(value, received);
+		received += value.byteLength;
+	}
+	return received === length ? out.buffer : out.buffer.slice(0, received);
 }
 
 function validateJsonLength(jsonLength: number): void {
@@ -107,7 +140,16 @@ export class VoiceBank {
 	static async load(koe: Blob | string): Promise<VoiceBank> {
 		try {
 			if (typeof koe === "string") {
-				if (!/^(https?|blob):/i.test(koe)) {
+				// Range requests on blob: URLs are not portable (Firefox/Safari answer
+				// 200); the data already lives in memory, so read it back as a Blob.
+				if (/^blob:/i.test(koe)) {
+					const res = await fetch(koe);
+					if (!res.ok) {
+						throw new Error(`blob: URL fetch failed: ${res.status}`);
+					}
+					return await VoiceBank.fromBlob(await res.blob());
+				}
+				if (!/^https?:/i.test(koe)) {
 					throw new Error(`unsupported URL protocol: ${koe}`);
 				}
 				const header = await rangeFetch(koe, 0, 8);
@@ -120,15 +162,7 @@ export class VoiceBank {
 					new RangeVoiceSource(koe, pcmBase(jsonLength)),
 				);
 			}
-			const header = await koe.slice(0, 8).arrayBuffer();
-			const { jsonLength } = parseKoeHeader(header);
-			validateJsonLength(jsonLength);
-			const json = await koe.slice(8, 8 + jsonLength).arrayBuffer();
-			const manifest = parseManifest(json);
-			return new VoiceBank(
-				manifest,
-				new BlobVoiceSource(koe, pcmBase(jsonLength)),
-			);
+			return await VoiceBank.fromBlob(koe);
 		} catch (error) {
 			throw new Error(
 				`Failed to load .koe voice bank: ${error instanceof Error ? error.message : String(error)}`,
@@ -136,9 +170,23 @@ export class VoiceBank {
 		}
 	}
 
+	private static async fromBlob(koe: Blob): Promise<VoiceBank> {
+		const header = await koe.slice(0, 8).arrayBuffer();
+		const { jsonLength } = parseKoeHeader(header);
+		validateJsonLength(jsonLength);
+		const json = await koe.slice(8, 8 + jsonLength).arrayBuffer();
+		const manifest = parseManifest(json);
+		return new VoiceBank(
+			manifest,
+			new BlobVoiceSource(koe, pcmBase(jsonLength)),
+		);
+	}
+
 	/** True if the bank contains a phoneme under this alias. */
 	has(phoneme: string): boolean {
-		return this.manifest.phonemes[phoneme] !== undefined;
+		// Own-property check: a plain [phoneme] access would also match inherited
+		// Object.prototype keys like "toString" / "constructor".
+		return Object.hasOwn(this.manifest.phonemes, phoneme);
 	}
 
 	/**
@@ -147,8 +195,8 @@ export class VoiceBank {
 	 * worker / AudioWorklet.
 	 */
 	async readPcmBytes(phoneme: string): Promise<ArrayBuffer | null> {
+		if (!Object.hasOwn(this.manifest.phonemes, phoneme)) return null;
 		const entry = this.manifest.phonemes[phoneme];
-		if (!entry) return null;
 		if (
 			!Number.isInteger(entry.offset) ||
 			!Number.isInteger(entry.length) ||
@@ -168,7 +216,9 @@ export class VoiceBank {
 	async getPcm(phoneme: string): Promise<Float64Array | null> {
 		const buf = await this.readPcmBytes(phoneme);
 		if (!buf) return null;
-		const int16 = new Int16Array(buf);
+		// A truncated read (Blob clamped at EOF) can yield an odd byte count,
+		// which the Int16Array(buffer) constructor rejects — floor to whole samples.
+		const int16 = new Int16Array(buf, 0, Math.floor(buf.byteLength / 2));
 		const f64 = new Float64Array(int16.length);
 		for (let i = 0; i < int16.length; i++) f64[i] = int16[i] / 32768;
 		return f64;

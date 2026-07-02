@@ -30,9 +30,16 @@ export function parseWav(buf: ArrayBuffer): WavData {
 			channels = view.getUint16(pos + 2, true);
 			sampleRate = view.getUint32(pos + 4, true);
 			bitsPerSample = view.getUint16(pos + 14, true);
+			// WAVE_FORMAT_EXTENSIBLE: the real format code is the first 2 bytes of
+			// the SubFormat GUID in the extension.
+			if (audioFormat === 0xfffe && size >= 40) {
+				audioFormat = view.getUint16(pos + 24, true);
+			}
 		} else if (id === "data") {
 			dataOffset = pos;
-			dataLength = size;
+			// Clamp to the actual file size — a corrupt chunk header could otherwise
+			// send sample reads past the end of the buffer.
+			dataLength = Math.min(size, view.byteLength - pos);
 			break;
 		}
 
@@ -41,6 +48,18 @@ export function parseWav(buf: ArrayBuffer): WavData {
 
 	if (!dataOffset) throw new Error("WAV has no data chunk");
 	if (!channels || !sampleRate) throw new Error("WAV fmt chunk missing");
+
+	// Reject anything the sample loop below cannot decode — falling through
+	// would silently produce all-zero (silent) audio.
+	const supported =
+		(audioFormat === 3 && bitsPerSample === 32) ||
+		(audioFormat === 1 &&
+			(bitsPerSample === 8 || bitsPerSample === 16 || bitsPerSample === 24));
+	if (!supported) {
+		throw new Error(
+			`Unsupported WAV format ${audioFormat} / ${bitsPerSample}-bit (need PCM 8/16/24-bit or IEEE float 32-bit)`,
+		);
+	}
 
 	const bytesPerSample = bitsPerSample >> 3;
 	const totalSamples = Math.floor(dataLength / bytesPerSample);

@@ -1,18 +1,44 @@
 #!/usr/bin/env node
-import { readdir, readFile, writeFile, mkdir } from "node:fs/promises";
-import { join, dirname, basename, resolve } from "node:path";
-import { parseOto } from "./parse-oto.js";
-import { normalizePcm } from "./wav.js";
-import { pack, type PackInput } from "./pack.js";
-import { parseFrqAverageF0, frqFileName } from "./frq.js";
-import { pitchFromAliasSuffix } from "./pitch.js";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { packKoe } from "../koe.js";
+import { frqFileName, parseFrqAverageF0 } from "./frq.js";
+import { type PackInput, pack } from "./pack.js";
+import { parseOto } from "./parse-oto.js";
+import { pitchFromAliasSuffix } from "./pitch.js";
+import { normalizePcm } from "./wav.js";
 
 const [voiceDir, outDir = "dist"] = process.argv.slice(2);
 
 if (!voiceDir) {
 	process.stderr.write("Usage: koe-convert <voice-dir> [output-dir]\n");
 	process.exit(1);
+}
+
+/**
+ * Resolve a filename taken from oto.ini, rejecting paths that escape the
+ * directory — otherwise a malicious `wav=..\..\...` entry could pull arbitrary
+ * files from outside the voice bank into the archive.
+ */
+function resolveInside(dir: string, name: string): string {
+	const root = resolve(dir);
+	const path = resolve(root, name);
+	if (path !== root && !path.startsWith(root + sep)) {
+		throw new Error(`path escapes voice bank directory: ${name}`);
+	}
+	return path;
+}
+
+/**
+ * Copy a Buffer's exact byte range into a standalone ArrayBuffer. Buffers
+ * under 4 KiB come from Node's shared allocation pool, so `.buffer` alone
+ * would expose the whole pool at the wrong offset.
+ */
+function toArrayBuffer(buf: Buffer): ArrayBuffer {
+	return buf.buffer.slice(
+		buf.byteOffset,
+		buf.byteOffset + buf.byteLength,
+	) as ArrayBuffer;
 }
 
 async function findOtoFiles(dir: string): Promise<string[]> {
@@ -39,20 +65,27 @@ async function main() {
 	for (const otoPath of otoFiles) {
 		const otoDir = dirname(otoPath);
 		const rawBytes = await readFile(otoPath);
-		const content = new TextDecoder("shift_jis").decode(rawBytes);
+		// UTAU oto.ini is traditionally Shift-JIS; honour a UTF-8 BOM when present.
+		const isUtf8Bom =
+			rawBytes[0] === 0xef && rawBytes[1] === 0xbb && rawBytes[2] === 0xbf;
+		const content = new TextDecoder(isUtf8Bom ? "utf-8" : "shift_jis").decode(
+			rawBytes,
+		);
 		const entries = parseOto(content);
 
 		for (const oto of entries) {
-			const wavPath = join(otoDir, oto.wav);
 			try {
+				const wavPath = resolveInside(otoDir, oto.wav);
 				const wavBytes = await readFile(wavPath);
-				const pcm = normalizePcm(wavBytes.buffer as ArrayBuffer);
+				const pcm = normalizePcm(toArrayBuffer(wavBytes));
 
 				// Recorded pitch: prefer the .frq average, then the alias suffix.
 				let recordedPitch = pitchFromAliasSuffix(oto.alias) ?? 0;
 				try {
-					const frqBytes = await readFile(join(otoDir, frqFileName(oto.wav)));
-					const avg = parseFrqAverageF0(frqBytes.buffer as ArrayBuffer);
+					const frqBytes = await readFile(
+						resolveInside(otoDir, frqFileName(oto.wav)),
+					);
+					const avg = parseFrqAverageF0(toArrayBuffer(frqBytes));
 					if (avg) recordedPitch = avg;
 				} catch {
 					/* no frq file — fall back to suffix / autocorrelation */
@@ -62,7 +95,7 @@ async function main() {
 			} catch (err) {
 				const msg = err instanceof Error ? err.message : String(err);
 				process.stderr.write(
-					`[skip] ${oto.alias} (${basename(wavPath)}): ${msg}\n`,
+					`[skip] ${oto.alias} (${basename(oto.wav)}): ${msg}\n`,
 				);
 				skipped++;
 			}
@@ -77,7 +110,7 @@ async function main() {
 	const { manifest, bin } = pack(inputs);
 
 	// Single-file .koe archive, named after the source directory.
-	const koeName = basename(resolve(voiceDir)) + ".koe";
+	const koeName = `${basename(resolve(voiceDir))}.koe`;
 	const koe = packKoe(manifest, [bin]);
 	const koeBytes = Buffer.from(await koe.arrayBuffer());
 

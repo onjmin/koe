@@ -19,4 +19,5 @@ app.use("/*", serveStatic({ root: "./demo" }));
 const port = Number(process.env.PORT) || 3000;
 console.log(`\nkoe dev server → http://localhost:${port}\n`);
 
-serve({ fetch: app.fetch, port });
+// Bind loopback only — the default 0.0.0.0 would expose the dev server on LAN.
+serve({ fetch: app.fetch, port, hostname: "127.0.0.1" });

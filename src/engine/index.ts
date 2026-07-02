@@ -56,6 +56,10 @@ export class KoeEngine {
 	async load(koe: Blob | string): Promise<void> {
 		await this.ctx.audioWorklet.addModule(this.workletUrl);
 
+		// Re-loading: tear down the previous node, or both would keep playing.
+		this.node?.disconnect();
+		this.node = null;
+
 		this.bank = await VoiceBank.load(koe);
 		this.delivered.clear();
 		this.pending.clear();
@@ -82,14 +86,20 @@ export class KoeEngine {
 		if (existing) return existing;
 		if (!this.bank || !this.node) return Promise.resolve();
 
-		const load = this.bank.readPcmBytes(name).then((buf) => {
-			if (!buf) return;
-			this.node!.port.postMessage({ type: "phoneme", name, buffer: buf }, [
-				buf,
-			]);
-			this.delivered.add(name);
-			this.pending.delete(name);
-		});
+		const load = this.bank
+			.readPcmBytes(name)
+			.then((buf) => {
+				if (!buf || !this.node) return;
+				this.node.port.postMessage({ type: "phoneme", name, buffer: buf }, [
+					buf,
+				]);
+				this.delivered.add(name);
+			})
+			.finally(() => {
+				// Always clear pending — a failed fetch must stay retryable, or the
+				// rejected promise would poison every later play() of this phoneme.
+				this.pending.delete(name);
+			});
 
 		this.pending.set(name, load);
 		return load;
@@ -112,6 +122,19 @@ export class KoeEngine {
 	/** Resume the AudioContext if suspended (e.g. after autoplay block). */
 	async resume(): Promise<void> {
 		if (this.ctx.state === "suspended") await this.ctx.resume();
+	}
+
+	/**
+	 * Tear down the worklet node and close the AudioContext, releasing the audio
+	 * hardware. The engine cannot be reused afterwards — create a new one.
+	 */
+	async dispose(): Promise<void> {
+		this.node?.disconnect();
+		this.node = null;
+		this.bank = null;
+		this.delivered.clear();
+		this.pending.clear();
+		if (this.ctx.state !== "closed") await this.ctx.close();
 	}
 
 	/**

@@ -11,6 +11,9 @@ export default defineConfig([
     outDir: 'dist',
     clean: true,
     sourcemap: true,
+    // Bundle fflate — consumers load this file directly as a <script type="module">
+    // with no bundler of their own, so bare specifiers must be inlined.
+    noExternal: ['fflate'],
     // Ship the worldline WASM assets so consumers can load them from the
     // package (e.g. via a CDN: <cdn>/@onjmin/koe/dist/world/worldline.js).
     async onSuccess() {

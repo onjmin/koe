@@ -23,6 +23,8 @@ export {
 	toInt16,
 	toMono,
 } from "./converter/wav.js";
+export type { ZipFile } from "./converter/zip.js";
+export { unzipToFileMap } from "./converter/zip.js";
 export type { KoeEngineOptions, NoteEvent } from "./engine/index.js";
 export { KoeEngine } from "./engine/index.js";
 // Voice bank — DOM/AudioContext-free PCM access (manifest + getPcm)

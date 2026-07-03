@@ -265,6 +265,12 @@
           <input type="file" id="voiceFiles" multiple webkitdirectory />
           <p class="hint" style="margin-top:6px">フォルダを選んで変換するだけ。録音ピッチは frq から自動取得し、.koe を生成して自動で読み込みます。</p>
         </div>
+        <div class="or">または</div>
+        <div class="field">
+          <label class="lbl">UTAU 音源 zip</label>
+          <input type="file" id="voiceZip" accept=".zip" />
+          <p class="hint" style="margin-top:6px">zip のまま選んでも変換できます（ブラウザ内で自動的に解凍します）。</p>
+        </div>
         <div class="btn-row">
           <button class="btn" id="convertBtn" disabled>変換</button>
           <button class="btn green" id="downloadBtn" style="display:none">.koe 保存</button>
@@ -363,6 +369,7 @@
       parseOto, normalizePcm, trimToOto,
       parseFrqAverageF0, frqFileName, pitchFromAliasSuffix,
       packKoe, KoeEngine, Worldline, leadInFromEntry,
+      unzipToFileMap,
     } from './index.js';
 
     // ── state ──
@@ -391,18 +398,35 @@
 
     // ════════ STEP 1 — Convert ════════
     const voiceFiles = $('voiceFiles');
+    const voiceZip = $('voiceZip');
     const convertBtn = $('convertBtn');
     const downloadBtn = $('downloadBtn');
     const convertLog = $('convertLog');
     const convertProgress = $('convertProgress');
 
     voiceFiles.addEventListener('change', () => {
+      if (voiceFiles.files.length) voiceZip.value = '';
+      updateConvertUi();
+    });
+    voiceZip.addEventListener('change', () => {
+      if (voiceZip.files.length) voiceFiles.value = '';
+      updateConvertUi();
+    });
+
+    function updateConvertUi() {
+      if (voiceZip.files.length) {
+        const f = voiceZip.files[0];
+        convertBtn.disabled = false;
+        convertBtn.textContent = '▶ 変換する（zip）';
+        setLog(convertLog, `「${f.name}」を選択しました。変換ボタンを押してください。`);
+        return;
+      }
       const n = voiceFiles.files.length;
       convertBtn.disabled = n === 0;
       const dir = voiceFiles.files[0]?.webkitRelativePath.split('/')[0] || '';
       convertBtn.textContent = n ? `▶ 変換する（${n} ファイル）` : '変換';
       setLog(convertLog, n ? `「${dir}」 — ${n} ファイル。変換ボタンを押してください。` : '音源フォルダを選択してください。');
-    });
+    }
 
     convertBtn.addEventListener('click', async () => {
       convertBtn.disabled = true;
@@ -430,9 +454,18 @@
     });
 
     async function runConvert() {
-      const fileMap = {};
-      for (const f of voiceFiles.files) fileMap[f.webkitRelativePath.replace(/\\/g, '/')] = f;
-      const topDir = (voiceFiles.files[0]?.webkitRelativePath.split('/')[0]) || 'voice';
+      let fileMap = {};
+      let topDir = 'voice';
+      if (voiceZip.files.length) {
+        const zipFile = voiceZip.files[0];
+        appendLog(convertLog, `「${zipFile.name}」を解凍しています…`);
+        fileMap = await unzipToFileMap(await zipFile.arrayBuffer());
+        const firstPath = Object.keys(fileMap)[0] || '';
+        topDir = firstPath.includes('/') ? firstPath.split('/')[0] : zipFile.name.replace(/\.zip$/i, '');
+      } else {
+        for (const f of voiceFiles.files) fileMap[f.webkitRelativePath.replace(/\\/g, '/')] = f;
+        topDir = (voiceFiles.files[0]?.webkitRelativePath.split('/')[0]) || 'voice';
+      }
 
       const otoFiles = Object.entries(fileMap).filter(([p]) => /(^|\/)oto\.ini$/i.test(p));
       if (!otoFiles.length) throw new Error('oto.ini が見つかりません（フォルダごと選択してください）');

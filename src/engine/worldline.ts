@@ -75,14 +75,33 @@ export interface WorldlineLoadOptions {
 	scriptUrl: string;
 }
 
+/**
+ * A per-frame expression value: either a flat constant for the whole note, or
+ * a function evaluated once per 10ms WORLD frame for a custom curve (vibrato,
+ * portamento, scoop-in, humanize jitter, hand-drawn automation, …).
+ *
+ * `tMs` is elapsed time from the start of the rendered buffer (0 = includes
+ * the `preMs` lead-in), `totalMs` is the full rendered length (`preMs +
+ * durationMs`). Callers own all curve shaping — worldline itself has no
+ * opinion on what "vibrato" or "scoop" means, it just samples whatever
+ * function you give it once per frame.
+ */
+export type CurveInput = number | ((tMs: number, totalMs: number) => number);
+
+const sampleCurve = (input: number, curve: CurveInput, totalMs: number): number =>
+	typeof curve === "function" ? curve(input, totalMs) : curve;
+
 export interface RenderNoteParams {
 	/**
 	 * Source phoneme PCM normalised to [-1, 1] (e.g. from
 	 * `VoiceBank.getPcm()` / `KoeEngine.getPcm()`).
 	 */
 	pcm: Float64Array;
-	/** Target output pitch in Hz. */
-	pitch: number;
+	/**
+	 * Target output pitch in Hz. Pass a function for vibrato, portamento,
+	 * scoop-in, pitch-drift humanize, etc. — it is sampled once per 10ms frame.
+	 */
+	pitch: CurveInput;
 	/** Sustain / vowel duration in ms (the lead-in below is rendered on top). */
 	durationMs: number;
 	/** Preutterance / lead-in in ms — convert from {@link PhonemeEntry.pre}. */
@@ -91,6 +110,24 @@ export interface RenderNoteParams {
 	consonantMs: number;
 	/** Reference tempo in BPM for worldline's internal timing. Default 120. */
 	tempo?: number;
+	/**
+	 * Formant/gender shift, 0-1. 0.5 (default) = unmodified. Below 0.5 skews
+	 * toward a lower/thicker formant (older, huskier); above 0.5 toward a
+	 * higher/thinner one (younger, brighter) — pitch itself is unaffected.
+	 */
+	gender?: CurveInput;
+	/**
+	 * Tension, 0-1. 0.5 (default) = neutral. Higher = tighter/more strained
+	 * ("こぶし"-style push); lower = more relaxed/breathy-adjacent.
+	 */
+	tension?: CurveInput;
+	/** Breathiness, 0-1. 0.5 (default) = neutral. Higher = airier/whispered. */
+	breathiness?: CurveInput;
+	/**
+	 * Voicing ratio, 0-1. 1.0 (default) = fully voiced. Lower blends toward an
+	 * unvoiced/falsetto-adjacent texture.
+	 */
+	voicing?: CurveInput;
 }
 
 /** Convert a sample count at 48 kHz to milliseconds. */
@@ -220,12 +257,26 @@ export class Worldline {
 	 *          {@link MIN_WORLDLINE_SAMPLES} (too short for stable F0 analysis).
 	 */
 	renderNote(params: RenderNoteParams): Float32Array | null {
-		const { pcm, pitch, durationMs, preMs, consonantMs, tempo = 120 } = params;
+		const {
+			pcm,
+			pitch,
+			durationMs,
+			preMs,
+			consonantMs,
+			tempo = 120,
+			gender = 0.5,
+			tension = 0.5,
+			breathiness = 0.5,
+			voicing = 1.0,
+		} = params;
 		if (!pcm || pcm.length < MIN_WORLDLINE_SAMPLES) return null;
 
 		const WL = this.wasm;
 		const FS = WORLDLINE_SAMPLE_RATE;
-		const midiNote = Math.round(69 + 12 * Math.log2(pitch / 440));
+		// Representative pitch for the resampler's target note — the midpoint of
+		// the vowel sustain when pitch is a curve, otherwise the flat value.
+		const basePitch = sampleCurve(preMs + durationMs / 2, pitch, preMs + durationMs);
+		const midiNote = Math.round(69 + 12 * Math.log2(basePitch / 440));
 		const posMs = 0; // no leading silence
 		const reqLen = preMs + durationMs; // render lead-in/consonant + vowel
 
@@ -284,11 +335,22 @@ export class Worldline {
 
 		const totalMs = posMs + reqLen + WL_FRAME_MS * 2;
 		const nFrames = Math.ceil(totalMs / WL_FRAME_MS) + 4;
-		const f0Arr = new Float64Array(nFrames).fill(pitch);
-		const gArr = new Float64Array(nFrames).fill(0.5);
-		const tArr = new Float64Array(nFrames).fill(0.5);
-		const bArr = new Float64Array(nFrames).fill(0.5);
-		const vArr = new Float64Array(nFrames).fill(1.0);
+		// Sample each curve once per 10ms frame. Plain numbers short-circuit to a
+		// flat fill (same cost as before); functions get evaluated per-frame so
+		// callers can draw vibrato, portamento, scoop-in, humanize jitter, etc.
+		const f0Arr = new Float64Array(nFrames);
+		const gArr = new Float64Array(nFrames);
+		const tArr = new Float64Array(nFrames);
+		const bArr = new Float64Array(nFrames);
+		const vArr = new Float64Array(nFrames);
+		for (let i = 0; i < nFrames; i++) {
+			const tMs = i * WL_FRAME_MS;
+			f0Arr[i] = sampleCurve(tMs, pitch, totalMs);
+			gArr[i] = sampleCurve(tMs, gender, totalMs);
+			tArr[i] = sampleCurve(tMs, tension, totalMs);
+			bArr[i] = sampleCurve(tMs, breathiness, totalMs);
+			vArr[i] = sampleCurve(tMs, voicing, totalMs);
+		}
 
 		const f0Ptr = WL._malloc(nFrames * 8);
 		const gPtr = WL._malloc(nFrames * 8);

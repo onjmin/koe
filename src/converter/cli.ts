@@ -2,11 +2,11 @@
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { packKoe } from "../koe.js";
-import { frqFileName, parseFrqAverageF0 } from "./frq.js";
-import { type PackInput, pack } from "./pack.js";
+import { frqAverageF0InRange, frqFileName, parseFrq } from "./frq.js";
+import { otoRegion, type PackInput, pack } from "./pack.js";
 import { parseOto } from "./parse-oto.js";
 import { pitchFromAliasSuffix } from "./pitch.js";
-import { normalizePcm } from "./wav.js";
+import { readWavPcm48k } from "./wav.js";
 
 const [voiceDir, outDir = "dist"] = process.argv.slice(2);
 
@@ -77,16 +77,34 @@ async function main() {
 			try {
 				const wavPath = resolveInside(otoDir, oto.wav);
 				const wavBytes = await readFile(wavPath);
-				const pcm = normalizePcm(toArrayBuffer(wavBytes));
+				const { pcm, sourceRate } = readWavPcm48k(toArrayBuffer(wavBytes));
 
-				// Recorded pitch: prefer the .frq average, then the alias suffix.
+				// Recorded pitch: prefer the .frq curve, then the alias suffix.
 				let recordedPitch = pitchFromAliasSuffix(oto.alias) ?? 0;
 				try {
 					const frqBytes = await readFile(
 						resolveInside(otoDir, frqFileName(oto.wav)),
 					);
-					const avg = parseFrqAverageF0(toArrayBuffer(frqBytes));
-					if (avg) recordedPitch = avg;
+					const frq = parseFrq(toArrayBuffer(frqBytes));
+					if (frq) {
+						// Average the curve over the region this phoneme actually uses,
+						// preferring the sustain (from the preutterance to the cutoff) —
+						// that is what carries the perceived pitch and what two notes have
+						// to agree on to crossfade coherently. The header's whole-file
+						// average drags in leading silence and unvoiced consonants.
+						const { start, end } = otoRegion(pcm.length, oto);
+						const toMs = (samples: number) => (samples / 48000) * 1000;
+						const local =
+							frqAverageF0InRange(
+								frq,
+								toMs(start) + oto.pre,
+								toMs(end),
+								sourceRate,
+							) ||
+							frqAverageF0InRange(frq, toMs(start), toMs(end), sourceRate) ||
+							frq.averageF0;
+						if (local > 0) recordedPitch = local;
+					}
 				} catch {
 					/* no frq file — fall back to suffix / autocorrelation */
 				}

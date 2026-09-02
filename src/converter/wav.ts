@@ -123,12 +123,35 @@ export function toInt16(samples: Float32Array): Int16Array {
 	return out;
 }
 
-/** Normalize then convert a WAV to 48kHz/16bit/mono Int16 PCM. */
-export function normalizePcm(buf: ArrayBuffer): Int16Array {
+/**
+ * Decode a WAV to 48kHz/16bit/mono Int16 PCM, reporting the source sample rate.
+ *
+ * The rate is needed to index a sibling `.frq` file, whose analysis hop is
+ * counted in ORIGINAL samples — see {@link frqAverageF0InRange}.
+ *
+ * Note this does not touch amplitude: peak levels are carried through
+ * unchanged, so a bank's own relative loudness between phonemes is preserved
+ * (UTAU's engine instead normalises each region to −6 dBFS, which is why its
+ * イ/エ段 and 語尾 samples come out louder than recorded).
+ */
+export function readWavPcm48k(buf: ArrayBuffer): {
+	pcm: Int16Array;
+	sourceRate: number;
+} {
 	const wav = parseWav(buf);
 	const mono = toMono(wav);
 	const resampled = resample(mono, 48000);
-	return toInt16(resampled.samples);
+	return { pcm: toInt16(resampled.samples), sourceRate: wav.sampleRate };
+}
+
+/**
+ * Convert a WAV to 48kHz/16bit/mono Int16 PCM.
+ *
+ * @deprecated Misnomer — this never normalised amplitude. Use
+ * {@link readWavPcm48k}, which also reports the source sample rate.
+ */
+export function normalizePcm(buf: ArrayBuffer): Int16Array {
+	return readWavPcm48k(buf).pcm;
 }
 
 function readFourCC(view: DataView, pos: number): string {

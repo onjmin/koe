@@ -8,6 +8,22 @@ export interface KoeEngineOptions {
 	workletUrl?: string;
 }
 
+export interface PlayOptions {
+	/**
+	 * Play the first note's lead-in (its consonant / preutterance region) instead
+	 * of skipping straight to the vowel.
+	 *
+	 * Every note but the first gets its lead-in from the crossfade with the note
+	 * before it. The first note has no predecessor, so the lead-in has to come
+	 * from somewhere: with `leadIn` the phrase starts one preutterance EARLIER
+	 * relative to its beats, and {@link KoeEngine.play} returns that offset in
+	 * samples so a sequencer can schedule around it. Left off (the default), the
+	 * first note keeps its beat exactly but opens on its vowel, dropping the
+	 * consonant.
+	 */
+	leadIn?: boolean;
+}
+
 /**
  * Main-thread API for the koe concatenative synthesis engine.
  *
@@ -105,13 +121,37 @@ export class KoeEngine {
 		return load;
 	}
 
-	/** Stop current playback, preload the phonemes for `notes`, then queue them. */
-	async play(notes: NoteEvent[]): Promise<void> {
+	/**
+	 * Stop current playback, preload the phonemes for `notes`, then queue them.
+	 *
+	 * @returns the lead-in offset in samples — how far the first note's audio
+	 *          starts ahead of its beat. 0 unless {@link PlayOptions.leadIn}.
+	 */
+	async play(notes: NoteEvent[], options: PlayOptions = {}): Promise<number> {
 		if (!this.node) throw new Error("KoeEngine: call load() before play()");
 		this.node.port.postMessage({ type: "stop" });
 		const names = [...new Set(notes.map((n) => n.phoneme))].filter(Boolean);
 		await Promise.all(names.map((n) => this.ensurePhoneme(n)));
-		this.node.port.postMessage({ type: "play", notes });
+		const leadIn = options.leadIn === true;
+		this.node.port.postMessage({ type: "play", notes, leadIn });
+		return leadIn ? this.leadInSamples(notes) : 0;
+	}
+
+	/**
+	 * Output samples the first note's lead-in occupies ahead of its beat —
+	 * mirrors what the worklet does with `leadIn`, so callers can compensate.
+	 */
+	private leadInSamples(notes: NoteEvent[]): number {
+		const first = notes[0];
+		const m = this.bank?.manifest;
+		if (!first || !m || first.phoneme === "") return 0;
+		const entry = Object.hasOwn(m.phonemes, first.phoneme)
+			? m.phonemes[first.phoneme]
+			: undefined;
+		if (!entry || entry.length <= 0) return 0;
+		const recorded = entry.pitch || m.referencePitch || first.pitch || 1;
+		const stepRate = first.pitch / recorded;
+		return stepRate > 0 ? entry.pre / stepRate : 0;
 	}
 
 	/** Stop playback and clear the queue. */

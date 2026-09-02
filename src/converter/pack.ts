@@ -13,7 +13,7 @@ const clamp = (v: number, lo: number, hi: number) =>
 
 export interface PackInput {
 	oto: OtoEntry;
-	/** Full normalized PCM of the source WAV (48kHz / 16bit / mono) */
+	/** Full PCM of the source WAV (48kHz / 16bit / mono) */
 	pcm: Int16Array;
 	/** Known recorded pitch in Hz (e.g. from the .frq file). 0/undefined → auto-detect. */
 	recordedPitch?: number;
@@ -33,6 +33,50 @@ export interface TrimmedPhoneme {
 }
 
 /**
+ * Resolve an oto entry's usable region within the full 48 kHz PCM.
+ *
+ * Shared with the converter CLI, which needs the same bounds to look up the
+ * region's local f0 in a `.frq` curve.
+ */
+export function otoRegion(
+	pcmLength: number,
+	oto: OtoEntry,
+): { start: number; end: number } {
+	const start = clamp(msToSamples(oto.offset), 0, pcmLength);
+	const end =
+		oto.cutoff < 0
+			? clamp(start + msToSamples(-oto.cutoff), start, pcmLength)
+			: clamp(pcmLength - msToSamples(oto.cutoff), start, pcmLength);
+	return { start, end };
+}
+
+/**
+ * Remove the DC offset from a phoneme slice, returning an independent copy.
+ *
+ * A sample sitting off-centre cannot be crossfaded cleanly no matter how well
+ * the phase is aligned: the two constant offsets simply add, so the seam gets a
+ * step in its mean. Centring each phoneme at pack time is the only place this
+ * can be fixed cheaply, and it is a precondition for the playback-side phase
+ * alignment to actually deliver a flat crossfade.
+ *
+ * The copy is required as well as convenient — several oto entries routinely
+ * point into the same source WAV, so the slices must not share storage.
+ */
+function centerSlice(slice: Int16Array): Int16Array {
+	const out = new Int16Array(slice.length);
+	if (slice.length === 0) return out;
+
+	let sum = 0;
+	for (let i = 0; i < slice.length; i++) sum += slice[i];
+	const dc = Math.round(sum / slice.length);
+
+	for (let i = 0; i < slice.length; i++) {
+		out[i] = clamp(slice[i] - dc, -32768, 32767);
+	}
+	return out;
+}
+
+/**
  * Cut the full WAV PCM down to its usable oto region and recompute parameters
  * relative to the trimmed start.
  *
@@ -49,15 +93,11 @@ export function trimToOto(
 	oto: OtoEntry,
 	recordedPitch = 0,
 ): TrimmedPhoneme {
-	const full = pcm.length;
+	const { start, end } = otoRegion(pcm.length, oto);
 
-	const start = clamp(msToSamples(oto.offset), 0, full);
-	const end =
-		oto.cutoff < 0
-			? clamp(start + msToSamples(-oto.cutoff), start, full)
-			: clamp(full - msToSamples(oto.cutoff), start, full);
-
-	const slice = pcm.subarray(start, end);
+	// Centre the slice: the stored PCM is what playback crossfades, so the DC
+	// offset has to go before it is written to voice.bin.
+	const slice = centerSlice(pcm.subarray(start, end));
 	const length = slice.length;
 
 	const pre = clamp(msToSamples(oto.pre), 0, length);
@@ -82,8 +122,8 @@ export function trimToOto(
 }
 
 /**
- * Pack normalized PCM phonemes into voice.bin + manifest.json.
- * Each phoneme is trimmed to its oto region first.
+ * Pack phonemes into voice.bin + manifest.json.
+ * Each phoneme is trimmed to its oto region and DC-centred first.
  * Duplicate aliases are silently overwritten by the later entry.
  */
 export function pack(inputs: PackInput[], referencePitch = 220): PackOutput {

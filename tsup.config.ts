@@ -37,7 +37,14 @@ export default defineConfig([
     format: ['esm'],
     platform: 'node',
     outDir: 'dist',
-    banner: { js: '#!/usr/bin/env node' },
+    sourcemap: false,
+  },
+  // CLI oto.ini generator — Node.js ESM
+  {
+    entry: { 'koe-oto': 'src/oto/cli.ts' },
+    format: ['esm'],
+    platform: 'node',
+    outDir: 'dist',
     sourcemap: false,
   },
 ]);

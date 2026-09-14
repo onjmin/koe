@@ -1,4 +1,4 @@
-import { unzipSync } from "fflate";
+import { unzipSync, zipSync } from "fflate";
 
 /** Minimal file-like handle so zip entries can stand in for `File` objects. */
 export interface ZipFile {
@@ -71,4 +71,18 @@ function readUtf8Flags(buf: Uint8Array): boolean[] {
 		cdOffset += 46 + nameLen + extraLen + commentLen;
 	}
 	return flags;
+}
+
+/**
+ * Pack a path → bytes map into a zip Blob.
+ *
+ * Entry names are written as UTF-8 with the language flag set, which is what
+ * every current unzip tool reads — including Windows Explorer, so a bank whose
+ * folders are named in Japanese comes back out intact.
+ */
+export function zipFiles(files: Record<string, Uint8Array>): Blob {
+	const packed = zipSync(files, { level: 6 });
+	const bytes = new Uint8Array(packed.length);
+	bytes.set(packed);
+	return new Blob([bytes], { type: "application/zip" });
 }

@@ -31,7 +31,7 @@ export {
 	toMono,
 } from "./converter/wav.js";
 export type { ZipFile } from "./converter/zip.js";
-export { unzipToFileMap } from "./converter/zip.js";
+export { unzipToFileMap, zipFiles } from "./converter/zip.js";
 export type {
 	KoeEngineOptions,
 	NoteEvent,
@@ -52,9 +52,36 @@ export {
 	WORLDLINE_SAMPLE_RATE,
 	Worldline,
 } from "./engine/worldline.js";
-
 // .koe archive format
 export { packKoe, parseKoeHeader, pcmBase } from "./koe.js";
+// oto.ini generation — estimate 原音設定 from the recordings themselves
+export type { Grid, MoraPosition } from "./oto/estimate.js";
+export {
+	detectGrid,
+	estimateSequence,
+	estimateSolo,
+	estimateVowelJoin,
+	locateMora,
+} from "./oto/estimate.js";
+export type { Frames } from "./oto/frames.js";
+export { analyze, analyzeWav } from "./oto/frames.js";
+export type {
+	FileResult,
+	GenerateOptions,
+	GenerateResult,
+	SkippedFile,
+	WavInput,
+} from "./oto/generate.js";
+export {
+	generateOto,
+	generateOtoForFile,
+	suffixFromFolderName,
+	summarise,
+	transcribe,
+} from "./oto/generate.js";
+export type { ConsonantClass, Syllable } from "./oto/kana.js";
+export { splitKana, toHiragana } from "./oto/kana.js";
+export { encodeOto, encodeShiftJis, formatOto } from "./oto/write.js";
 
 // Shared types
 export type { Manifest, PhonemeEntry } from "./types.js";

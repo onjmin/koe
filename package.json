@@ -15,7 +15,8 @@
     }
   },
   "bin": {
-    "koe-convert": "./dist/koe-convert.js"
+    "koe-convert": "./dist/koe-convert.js",
+    "koe-oto": "./dist/koe-oto.js"
   },
   "files": [
     "dist"
@@ -25,6 +26,7 @@
     "dev": "tsx src/dev-server.ts",
     "watch": "tsup --watch",
     "convert": "tsx src/converter/cli.ts",
+    "oto": "tsx src/oto/cli.ts",
     "typecheck": "tsc --noEmit",
     "lint": "biome check src",
     "lint2": "biome format src --write",

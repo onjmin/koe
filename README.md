@@ -3,6 +3,7 @@
 ブラウザ上でUTAU音源をラグ無しで再生するnpmモジュール。
 
 UTAU の oto.ini で定義された音源を `.koe` アーカイブに変換し、WebAssembly + AudioWorklet でリアルタイム再生・高品質再合成を行う。
+oto.ini が無い収録済み wav フォルダからは、原音設定そのものを自動生成できる。
 
 - [DEMO](https://onjmin.github.io/koe/demo) koeフォーマット作成もこちらで
 - [npm](https://www.npmjs.com/package/@onjmin/koe)
@@ -42,7 +43,114 @@ UTAU音源 (wav + oto.ini + frq)
 
 ## 使い方
 
-### 1. 音源の変換 (oto.ini → .koe)
+### 1. 原音設定の自動生成 (wav → oto.ini)
+
+収録済みの wav フォルダから oto.ini を生成する。CLI と [DEMO ページ](https://onjmin.github.io/koe/demo) の両方から使える。
+
+#### GUI から
+
+DEMO ページの「原音設定 — oto.ini を作る」カードで、wav フォルダ（または zip）を選んでボタンを押すだけ。wav が入っているフォルダごとに oto.ini ができ、そのまま保存（複数フォルダなら zip）できる。「変換へ」を押すと、作った oto.ini をそのまま使って `.koe` を生成し、その場で歌わせて確認できる。
+
+エイリアス接尾辞と、`- か` / `* あ` エイリアスを作るかどうかはカード内で切り替えられる。処理はすべてブラウザ内で完結し、wav はどこにも送信されない。
+
+#### CLI から
+
+```bash
+npx koe-oto <音源フォルダ>
+```
+
+フォルダを渡すだけで、その下の「wav が置かれている全フォルダ」それぞれに oto.ini が書き出される。
+
+| オプション | 説明 |
+| --- | --- |
+| `-n`, `--dry-run` | 書き込まず、生成結果の件数だけ表示する |
+| `-f`, `--force` | 既存の oto.ini を上書きする (`oto.ini.bak` を残す) |
+| `--suffix <s>` | 全エイリアスの末尾に `<s>` を付ける (既定: フォルダ名が音階名なら `_G4` 等) |
+| `-q`, `--quiet` | 集計行だけ出力する |
+
+既存の oto.ini があるフォルダは既定でスキップする。上書きしたい場合のみ `--force` を付ける。
+
+#### 収録方式の判定
+
+ファイル名がそのまま音素の書き起こしになっているので、方式はファイル名から決まる。
+
+| ファイル名 | 判定 | 生成されるエイリアス |
+| --- | --- | --- |
+| `か.wav` / `_きゃ.wav` | 単独音 | `か`, `- か` |
+| `_あ.wav` | 単独音 (母音) | `あ`, `- あ`, `* あ` |
+| `_ああいあうえあ.wav` | 連続音 | `- あ`, `a あ`, `a い`, `i あ`, … |
+| `_ああR.wav` | 連続音 + 語尾 | `- あ`, `a あ`, `a R` |
+| `_あb.wav` / `_ううわ↑.wav` | テイク違い | `あb`, `- あb` / `- う↑`, `u う↑` … |
+| `_xか.wav` | 語頭記号付き | `xか`, `- xか` |
+| `カラオケ.wav` | 仮名として読めない → スキップ | — |
+
+カタカナ・拗音・外来音 (`ヴぁ`, `てぃ`, `つぉ` 等) も解決する。仮名の前後に付いた `x` / `b` / `2` / `↑↓` のようなテイク記号はエイリアスに引き継ぐ。仮名として読めないファイルは音声ではないものとして飛ばすので、伴奏やサンプル曲が混ざったフォルダでもそのまま渡せる。
+
+フォルダ名が音階そのもの (`G4`) か、音階タグを含む (`多音階03：_G4（連続音）`) 場合は、多音階音源としてエイリアス末尾に `_G4` を付ける。音源全体で oto.ini のエイリアスは1つの名前空間に混ざるため、これが無いと音階ごとの `- あ` が互いを上書きしてしまう。
+
+#### 推定のしかた
+
+[UTAU音源制作wiki の原音設定記事](https://w.atwiki.jp/vbmaker/pages/17.html) のセオリーをそのまま実装している。
+
+- **オフセット** — 子音の立ち上がりの少し手前。さ行・は行のような摩擦音は 4kHz 以上の帯域で先に立ち上がるので、その帯域を見て検出する。
+- **先行発声** — 母音の開始点。無声子音 (か・さ・た・は・ぱ行) は声帯が鳴り出した瞬間、な・ま・ら行は鼻音/はじき音が開放された瞬間、や・わ行は渡りの中間。
+- **子音部 (固定範囲)** — 母音に入ってスペクトルが落ち着くまで。伸縮されるのが定常部の母音だけになる。
+- **オーバーラップ** — 先行発声に対する比で決める。共鳴音 (な・ま・ら・や・わ行) はおよそ 0.6 倍、摩擦音・破擦音は 0.3 倍、下限 12ms・上限 40ms。か・た・ぱ行は破裂前の無音を再現するため負値 (−10ms)。母音単体は 20ms 固定。
+- **右ブランク** — 減衰が始まる手前。負値 (オフセットからの相対値) で書き出す。
+
+連続音はガイドBGMに合わせて収録されるため、モーラが等間隔に並ぶ。オンセット検出の自己相関からテンポを求め、グリッドを当ててから各モーラを最寄りのオンセットに吸着させる。テンポが求まれば先行発声 = 間隔の 1/2、オーバーラップ = その 1/3、固定範囲 = その 1.5 倍、右ブランク = ノートの 2/3 間隔先、という既存音源が共通して使っているテンプレートを当てる。
+
+#### 精度
+
+手作業の音源との一致度 (絶対時刻でのずれ)。`重音テト単独音` は人力精度が高い音源として比較対象にした。
+
+| 音源 | 方式 | 先行発声 ≤20ms | ≤40ms | 中央絶対誤差 |
+| --- | --- | --- | --- | --- |
+| 重音テト単独音 | 単独音 | 72% | 85% | 11ms |
+| 欲音ルコ♀ A3 | 連続音 | 53% | 81% | 18ms |
+| つくよみちゃん _G4 | 連続音 | 42% | 71% | 25ms |
+| 束音ロゼ G4 | 連続音 | 43% | 61% | 28ms |
+| 欲音ルコ♂ | 連続音 | 30% | 55% | 37ms |
+
+テトでは他のパラメータも、オフセット ≤20ms 89% / 中央絶対誤差 8ms、オーバーラップ ≤20ms 79% / 10.6ms、右ブランク ≤20ms 85% / 8ms。一番緩いのは子音部 (固定範囲) で中央絶対誤差 34ms だが、これは伸縮の開始位置を決めるだけなのでリズムには効かない。
+
+連続音は音源ごとのテンプレート方針の差がそのまま誤差に出るため、単独音より一致率が落ちる (欲音ルコ♂ は人力でモーラごとに詰めてある音源)。
+
+setParam の自動推定と同程度で、そのまま歌わせられる水準ではあるが、商用配布するなら人の手で詰める前提の出力。
+
+なお `息.wav` `咳払い.wav` のような非言語音は、歌詞が仮名で書かれていない以上どんなエイリアスを振るべきか決めようがないのでスキップする (スキップしたファイルは `GenerateResult.skipped` と CLI の集計に出る)。必要ならその数行だけ手で足すことになる。
+
+#### コードから使う
+
+ブラウザでもそのまま動く (`fs` に依存しない)。
+
+```ts
+import { generateOto, formatOto, encodeOto } from "@onjmin/koe";
+
+const files = [{ name: "_あ.wav", data: arrayBuffer }, /* ... */];
+const { entries, skipped, style } = generateOto(files, { suffix: "_G4" });
+
+console.log(style);          // "solo" | "sequence" | "mixed"
+console.log(formatOto(entries));  // oto.ini のテキスト
+const bytes = encodeOto(entries); // Shift-JIS の Uint8Array
+```
+
+`generateOto` は同期処理なので、フォルダが大きいとブラウザのUIが固まる。進捗を出したい場合は1ファイルずつ回す:
+
+```ts
+import { generateOtoForFile, summarise } from "@onjmin/koe";
+
+for (const file of files) {
+  const { entries, skipped, style } = generateOtoForFile(file, { suffix: "_G4" });
+  // …集計して、ここでイベントループに制御を返す
+}
+```
+
+`generateOto` が返す `entries` は `parseOto` と同じ `OtoEntry[]` なので、そのまま `pack()` に渡して `.koe` 化できる。
+
+---
+
+### 2. 音源の変換 (oto.ini → .koe)
 
 CLIコマンド `koe-convert` で UTAU 音源を `.koe` アーカイブに変換する。
 
@@ -90,7 +198,7 @@ await fs.writeFile("voice.koe", buf);
 
 ---
 
-### 2. KoeEngine — リアルタイム再生 (ブラウザ)
+### 3. KoeEngine — リアルタイム再生 (ブラウザ)
 
 AudioWorklet を使った連接合成エンジン。`koe-worklet.js` を同じオリジンから配信する必要がある。
 
@@ -132,7 +240,7 @@ interface NoteEvent {
 
 ---
 
-### 3. VoiceBank — 音素 PCM の直接取得
+### 4. VoiceBank — 音素 PCM の直接取得
 
 AudioContext 不要。WORLD ボコーダや独自の合成処理に PCM を渡したい場合に使う。
 
@@ -161,7 +269,7 @@ bank.has("a"); // boolean
 
 ---
 
-### 4. Worldline — 高品質ノート合成 (WORLD ボコーダ)
+### 5. Worldline — 高品質ノート合成 (WORLD ボコーダ)
 
 OpenUtau の worldline WASM で F0 分析・再合成を行う。`worldline.js` と `worldline.wasm` を配信する必要がある。
 
@@ -201,7 +309,7 @@ if (audio) {
 
 ---
 
-### 5. .koe アーカイブ形式
+### 6. .koe アーカイブ形式
 
 ```
 [4B] magic 'KOE\0' (big-endian)
@@ -233,6 +341,14 @@ const pcmOffset = pcmBase(jsonLength); // PCM データの開始バイト位置
 | `KoeEngine` | AudioWorklet ベースの連接合成エンジン |
 | `VoiceBank` | .koe から音素 PCM をオンデマンド取得 |
 | `Worldline` | WORLD ボコーダによる高品質ノート合成 |
+| `generateOto` | wav 群 → oto.ini エントリを推定 (原音設定) |
+| `generateOtoForFile` | wav 1本ぶんの推定 (進捗表示したいとき用) |
+| `formatOto` / `encodeOto` | エントリ → oto.ini テキスト / Shift-JIS バイト列 |
+| `analyze` / `analyzeWav` | WAV → フレーム特徴量 (RMS・有声度・スペクトル) |
+| `estimateSolo` / `estimateSequence` | 単独音 / 連続音 1ファイル分のパラメータ推定 |
+| `detectGrid` | 連続音のモーラ位置とテンポを検出 |
+| `splitKana` | 仮名文字列 → モーラ (子音・母音・調音種別) |
+| `transcribe` | wav ファイル名 → モーラ列 |
 | `parseOto` | oto.ini テキストをパース |
 | `parseWav` | WAV バイナリをパース |
 | `toMono` | ステレオ → モノラル変換 |
@@ -242,6 +358,7 @@ const pcmOffset = pcmBase(jsonLength); // PCM データの開始バイト位置
 | `trimToOto` | WAV を oto リージョンにトリミング |
 | `packKoe` | manifest + PCM → .koe Blob |
 | `parseKoeHeader` | .koe ヘッダ解析 |
+| `unzipToFileMap` / `zipFiles` | zip の展開 / 作成 |
 | `pcmBase` | JSON長 → PCM 開始バイト位置 |
 | `detectF0` | PCM からピッチ自動検出 |
 | `noteNameToHz` | 音名 → Hz 変換 (例: `"A4"` → `440`) |

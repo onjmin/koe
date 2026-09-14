@@ -225,6 +225,19 @@
     .accordion-toggle[aria-expanded="true"] .acc-arrow { transform: rotate(90deg); }
     .accordion-body { display: none; flex-direction: column; gap: 12px; }
     .accordion-body.open { display: flex; }
+
+    /* ── oto.ini generator ── */
+    .check { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); cursor: pointer; }
+    .check input { width: 16px; height: 16px; accent-color: var(--pink); flex: 0 0 auto; }
+    .oto-list { display: flex; flex-direction: column; gap: 8px; }
+    .oto-item {
+      display: flex; align-items: center; gap: 8px;
+      border: var(--px) solid var(--line); background: var(--panel2);
+      padding: 8px 10px; font-size: 11px;
+    }
+    .oto-item .name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+    .oto-item .meta { color: var(--muted); font-size: 10px; }
+    .oto-item .btn { flex: 0 0 auto; padding: 6px 10px; font-size: 10px; box-shadow: 3px 3px 0 #000; }
     .divider { border: none; border-top: var(--px) dashed var(--line); margin: 2px 0; }
 
     footer { font-size: 10px; color: var(--line); text-align: center; padding-top: 4px; }
@@ -236,6 +249,46 @@
       <div class="logo">koe</div>
       <div class="tagline">UTAU CONCATENATIVE SYNTH ENGINE</div>
     </header>
+
+    <div class="section-label">原音設定（oto.ini が無いとき）</div>
+
+    <!-- STEP 0 — Estimate oto.ini straight from the recordings -->
+    <div class="card" id="stepOto">
+      <button class="accordion-toggle" id="otoToggle" aria-expanded="false" aria-controls="otoBody">
+        <span class="badge">設定</span><h2>oto.ini を作る</h2>
+        <span class="acc-arrow" style="margin-left:auto">▶</span>
+      </button>
+      <div class="accordion-body" id="otoBody">
+        <div class="field">
+          <label class="lbl">収録済み wav フォルダ</label>
+          <input type="file" id="otoFiles" multiple webkitdirectory />
+          <p class="hint" style="margin-top:6px">波形から左ブランク・子音部・先行発声・オーバーラップ・右ブランクを推定します。wav が入っているフォルダごとに oto.ini を作ります。</p>
+        </div>
+        <div class="or">または</div>
+        <div class="field">
+          <label class="lbl">wav の入った zip</label>
+          <input type="file" id="otoZip" accept=".zip" />
+        </div>
+        <div class="field">
+          <label class="lbl">エイリアス接尾辞</label>
+          <input type="text" id="otoSuffix" placeholder="自動（フォルダ名が音階なら _G4）" />
+        </div>
+        <label class="check"><input type="checkbox" id="otoHead" checked />「- か」語頭エイリアスも作る</label>
+        <label class="check"><input type="checkbox" id="otoJoin" checked />「* あ」母音結合エイリアスも作る</label>
+        <div class="btn-row">
+          <button class="btn" id="otoBtn" disabled>原音設定</button>
+        </div>
+        <div class="btn-row" id="otoActions" style="display:none">
+          <button class="btn green" id="otoSaveBtn">保存</button>
+          <button class="btn blue" id="otoUseBtn">変換へ</button>
+        </div>
+        <div class="progress"><div class="progress-bar" id="otoProgress"></div></div>
+        <div class="log" id="otoLog">wav フォルダを選択してください。</div>
+        <div class="oto-list" id="otoResults"></div>
+      </div>
+    </div>
+
+    <div class="arrow">▼</div>
 
     <div class="section-label">音源を用意する（どちらか）</div>
 
@@ -369,7 +422,8 @@
       parseOto, normalizePcm, trimToOto,
       parseFrqAverageF0, frqFileName, pitchFromAliasSuffix,
       packKoe, KoeEngine, Worldline, leadInFromEntry,
-      unzipToFileMap,
+      unzipToFileMap, zipFiles,
+      generateOtoForFile, summarise, suffixFromFolderName, encodeOto,
     } from './index.js';
 
     // ── state ──
@@ -379,22 +433,224 @@
     let currentManifest = null;
     let loadedSong = null;
     let allNames = [];
+    let preparedVoice = null;   // { fileMap, topDir } handed over from 原音設定
 
     // ── utils ──
     const $ = id => document.getElementById(id);
 
-    // ── accordion ──
-    const convertToggle = $('convertToggle');
-    const convertBody = $('convertBody');
-    convertToggle.addEventListener('click', () => {
-      const open = convertBody.classList.toggle('open');
-      convertToggle.setAttribute('aria-expanded', open);
-    });
+    // ── accordions ──
+    const accordion = (toggleId, bodyId) => {
+      const toggle = $(toggleId), body = $(bodyId);
+      toggle.addEventListener('click', () => {
+        const open = body.classList.toggle('open');
+        toggle.setAttribute('aria-expanded', open);
+      });
+      return { toggle, body };
+    };
+    const { body: convertBody } = accordion('convertToggle', 'convertBody');
+    const { body: otoBody } = accordion('otoToggle', 'otoBody');
     const appendLog = (el, msg) => { el.textContent += msg + '\n'; el.scrollTop = el.scrollHeight; el.style.display = 'block'; };
     const setLog = (el, msg) => { el.textContent = msg; el.style.display = 'block'; };
     const setProgress = (el, p) => { el.style.width = (Math.max(0, Math.min(1, p)) * 100).toFixed(1) + '%'; };
     const enable = card => card.classList.remove('off');
     const dl = (blob, name) => { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); };
+
+    // ════════ STEP 0 — Estimate oto.ini from the recordings ════════
+    const otoFiles = $('otoFiles');
+    const otoZip = $('otoZip');
+    const otoBtn = $('otoBtn');
+    const otoSaveBtn = $('otoSaveBtn');
+    const otoUseBtn = $('otoUseBtn');
+    const otoActions = $('otoActions');
+    const otoLog = $('otoLog');
+    const otoProgress = $('otoProgress');
+    const otoResults = $('otoResults');
+
+    let otoOutput = null;   // { folders: [{ dir, bytes, entries, skipped, style }], fileMap, topDir }
+
+    otoFiles.addEventListener('change', () => {
+      if (otoFiles.files.length) otoZip.value = '';
+      updateOtoUi();
+    });
+    otoZip.addEventListener('change', () => {
+      if (otoZip.files.length) otoFiles.value = '';
+      updateOtoUi();
+    });
+
+    function updateOtoUi() {
+      otoOutput = null;
+      otoResults.textContent = '';
+      otoActions.style.display = 'none';
+      setProgress(otoProgress, 0);
+
+      if (otoZip.files.length) {
+        otoBtn.disabled = false;
+        otoBtn.textContent = '▶ 原音設定する（zip）';
+        setLog(otoLog, `「${otoZip.files[0].name}」を選択しました。`);
+        return;
+      }
+      const wavs = [...otoFiles.files].filter(f => /\.wav$/i.test(f.name));
+      otoBtn.disabled = wavs.length === 0;
+      otoBtn.textContent = wavs.length ? `▶ 原音設定する（${wavs.length} wav）` : '原音設定';
+      setLog(otoLog, wavs.length
+        ? `「${otoFiles.files[0].webkitRelativePath.split('/')[0]}」 — ${wavs.length} wav。`
+        : 'wav フォルダを選択してください。');
+    }
+
+    otoBtn.addEventListener('click', async () => {
+      otoBtn.disabled = true;
+      otoLog.textContent = '';
+      otoResults.textContent = '';
+      otoActions.style.display = 'none';
+      setProgress(otoProgress, 0);
+      try {
+        otoOutput = await runOto();
+        setProgress(otoProgress, 1);
+        renderOtoResults(otoOutput);
+        otoSaveBtn.textContent = otoOutput.folders.length > 1 ? 'zip で保存' : 'oto.ini 保存';
+        otoActions.style.display = '';
+      } catch (err) {
+        appendLog(otoLog, `✗ ${err.message}`);
+        console.error(err);
+      } finally {
+        otoBtn.disabled = false;
+      }
+    });
+
+    /** The chosen recordings, as a path → file map. */
+    async function collectWavs() {
+      if (otoZip.files.length) {
+        const zipFile = otoZip.files[0];
+        appendLog(otoLog, `「${zipFile.name}」を解凍しています…`);
+        const map = await unzipToFileMap(await zipFile.arrayBuffer());
+        const first = Object.keys(map)[0] || '';
+        return {
+          fileMap: map,
+          topDir: first.includes('/') ? first.split('/')[0] : zipFile.name.replace(/\.zip$/i, ''),
+        };
+      }
+      const map = {};
+      for (const f of otoFiles.files) map[f.webkitRelativePath.replace(/\\/g, '/')] = f;
+      return { fileMap: map, topDir: otoFiles.files[0]?.webkitRelativePath.split('/')[0] || 'voice' };
+    }
+
+    async function runOto() {
+      const { fileMap, topDir } = await collectWavs();
+
+      // One oto.ini per folder that actually holds recordings, exactly as the
+      // CLI does — that is what keeps a multi-pitch bank's pitches apart.
+      const byDir = new Map();
+      for (const path of Object.keys(fileMap)) {
+        if (!/\.wav$/i.test(path)) continue;
+        const cut = path.lastIndexOf('/');
+        const dir = cut === -1 ? '' : path.slice(0, cut);
+        if (!byDir.has(dir)) byDir.set(dir, []);
+        byDir.get(dir).push(path);
+      }
+      if (byDir.size === 0) throw new Error('wav が見つかりません（フォルダごと選択してください）');
+
+      const total = [...byDir.values()].reduce((n, list) => n + list.length, 0);
+      appendLog(otoLog, `${byDir.size} フォルダ / ${total} wav`);
+
+      const manual = $('otoSuffix').value.trim();
+      const options = { headAliases: $('otoHead').checked, vowelJoinAliases: $('otoJoin').checked };
+
+      const folders = [];
+      let done = 0;
+      for (const [dir, paths] of [...byDir].sort((a, b) => a[0].localeCompare(b[0], 'ja'))) {
+        const folderName = dir.slice(dir.lastIndexOf('/') + 1);
+        const suffix = manual || suffixFromFolderName(folderName);
+        const entries = [];
+        let skipped = 0, solo = 0, sequence = 0;
+
+        for (const path of paths.sort((a, b) => a.localeCompare(b, 'ja'))) {
+          const name = path.slice(path.lastIndexOf('/') + 1);
+          const data = await fileMap[path].arrayBuffer();
+          const r = generateOtoForFile({ name, data }, { ...options, suffix });
+          entries.push(...r.entries);
+          if (r.skipped) skipped++;
+          if (r.style === 'solo') solo++;
+          if (r.style === 'sequence') sequence++;
+
+          done++;
+          setProgress(otoProgress, done / total);
+          // Analysis is synchronous and CPU-bound, so yield between files or the
+          // page never repaints. Not requestAnimationFrame: that stops firing
+          // the moment the tab goes to the background, and a long bank is
+          // exactly the thing a user switches away from.
+          await yieldToUi();
+        }
+
+        if (!entries.length) {
+          appendLog(otoLog, `[skip] ${dir || topDir}: 仮名として読めるファイルがありません`);
+          continue;
+        }
+        const bytes = encodeOto(entries);
+        folders.push({ dir, bytes, entries: entries.length, skipped, style: summarise(solo, sequence) });
+        // Put the result back into the map so 変換 can pick it up unchanged.
+        fileMap[(dir ? dir + '/' : '') + 'oto.ini'] = {
+          arrayBuffer: () => Promise.resolve(bytes.slice().buffer),
+        };
+      }
+
+      if (!folders.length) throw new Error('原音設定できるファイルがありません');
+      const entries = folders.reduce((n, f) => n + f.entries, 0);
+      const skipped = folders.reduce((n, f) => n + f.skipped, 0);
+      appendLog(otoLog, `✓ ${folders.length} oto.ini / ${entries} エントリ (${skipped} skip)`);
+      return { folders, fileMap, topDir };
+    }
+
+    const otoBlob = bytes => new Blob([bytes.slice()], { type: 'text/plain' });
+
+    /** Hand control back to the event loop — works in a background tab too. */
+    const yieldToUi = (() => {
+      if (typeof MessageChannel !== 'function') return () => new Promise(r => setTimeout(r, 0));
+      const channel = new MessageChannel();
+      channel.port1.start();
+      return () => new Promise(resolve => {
+        channel.port1.onmessage = () => resolve();
+        channel.port2.postMessage(0);
+      });
+    })();
+
+    function renderOtoResults({ folders, topDir }) {
+      otoResults.textContent = '';
+      for (const f of folders) {
+        const row = document.createElement('div');
+        row.className = 'oto-item';
+
+        const name = document.createElement('div');
+        name.className = 'name';
+        name.textContent = f.dir || topDir;
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.textContent = `${f.entries} エントリ・${f.style}${f.skipped ? ` (${f.skipped} skip)` : ''}`;
+        name.appendChild(meta);
+
+        const save = document.createElement('button');
+        save.className = 'btn ghost';
+        save.textContent = '保存';
+        save.addEventListener('click', () => dl(otoBlob(f.bytes), 'oto.ini'));
+
+        row.append(name, save);
+        otoResults.appendChild(row);
+      }
+    }
+
+    otoSaveBtn.addEventListener('click', () => {
+      if (!otoOutput) return;
+      const { folders, topDir } = otoOutput;
+      if (folders.length === 1) { dl(otoBlob(folders[0].bytes), 'oto.ini'); return; }
+      const files = {};
+      for (const f of folders) files[`${f.dir || topDir}/oto.ini`] = f.bytes;
+      dl(zipFiles(files), `${topDir}-oto.zip`);
+    });
+
+    otoUseBtn.addEventListener('click', () => {
+      if (!otoOutput) return;
+      preparedVoice = { fileMap: otoOutput.fileMap, topDir: otoOutput.topDir };
+      runConvertFlow();
+    });
 
     // ════════ STEP 1 — Convert ════════
     const voiceFiles = $('voiceFiles');
@@ -428,7 +684,11 @@
       setLog(convertLog, n ? `「${dir}」 — ${n} ファイル。変換ボタンを押してください。` : '音源フォルダを選択してください。');
     }
 
-    convertBtn.addEventListener('click', async () => {
+    convertBtn.addEventListener('click', () => runConvertFlow());
+
+    async function runConvertFlow() {
+      convertBody.classList.add('open');
+      $('convertToggle').setAttribute('aria-expanded', true);
       convertBtn.disabled = true;
       downloadBtn.style.display = 'none';
       convertLog.textContent = '';
@@ -447,7 +707,7 @@
       } finally {
         convertBtn.disabled = false;
       }
-    });
+    }
 
     downloadBtn.addEventListener('click', () => {
       if (convertedKoe) dl(convertedKoe, `${convertedName}.koe`);
@@ -456,7 +716,13 @@
     async function runConvert() {
       let fileMap = {};
       let topDir = 'voice';
-      if (voiceZip.files.length) {
+      if (preparedVoice) {
+        // Handed over from 原音設定: the wavs the user already picked, plus the
+        // oto.ini we just estimated for them.
+        ({ fileMap, topDir } = preparedVoice);
+        preparedVoice = null;
+        appendLog(convertLog, '原音設定で作った oto.ini を使います。');
+      } else if (voiceZip.files.length) {
         const zipFile = voiceZip.files[0];
         appendLog(convertLog, `「${zipFile.name}」を解凍しています…`);
         fileMap = await unzipToFileMap(await zipFile.arrayBuffer());

@@ -85,3 +85,7 @@ export { encodeOto, encodeShiftJis, formatOto } from "./oto/write.js";
 
 // Shared types
 export type { Manifest, PhonemeEntry } from "./types.js";
+
+// TTS integration
+export { UtauTTSAdapter } from "./utautts/UtauTTSAdapter.js";
+export type { UtauTTSPlan, UtauTTSUnit } from "./utautts/UtauTTSAdapter.js";

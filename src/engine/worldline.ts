@@ -91,6 +91,27 @@ export type CurveInput = number | ((tMs: number, totalMs: number) => number);
 const sampleCurve = (input: number, curve: CurveInput, totalMs: number): number =>
 	typeof curve === "function" ? curve(input, totalMs) : curve;
 
+export interface PhraseUnit {
+	pcm: Float64Array;
+	posMs: number;
+	skipMs: number;
+	lengthMs: number;
+	fadeInMs: number;
+	fadeOutMs: number;
+	consonantMs: number;
+	cutMs?: number;
+}
+
+export interface RenderPhraseParams {
+	units: PhraseUnit[];
+	pitch: CurveInput;
+	gender?: CurveInput;
+	tension?: CurveInput;
+	breathiness?: CurveInput;
+	voicing?: CurveInput;
+	tempo?: number;
+}
+
 export interface RenderNoteParams {
 	/**
 	 * Source phoneme PCM normalised to [-1, 1] (e.g. from
@@ -256,6 +277,126 @@ export class Worldline {
 	 * @returns Float32 PCM, or null when `pcm` is shorter than
 	 *          {@link MIN_WORLDLINE_SAMPLES} (too short for stable F0 analysis).
 	 */
+
+	renderPhrase(params: RenderPhraseParams): Float32Array | null {
+		const { units, pitch, gender = 0.5, tension = 0.5, breathiness = 0.5, voicing = 1.0, tempo = 120 } = params;
+		if (units.length === 0) return null;
+
+		const WL = this.wasm;
+		const FS = WORLDLINE_SAMPLE_RATE;
+
+		// Calculate total duration from the last unit's posMs + lengthMs
+		let totalMs = 0;
+		for (const u of units) {
+			const endMs = u.posMs + u.lengthMs;
+			if (endMs > totalMs) totalMs = endMs;
+		}
+		
+		const ps = WL._PhraseSynthNew();
+		if (!ps) return null;
+
+		const pointersToFree: number[] = [];
+
+		for (const u of units) {
+			if (!u.pcm || u.pcm.length < MIN_WORLDLINE_SAMPLES) continue;
+			
+			const reqPtr = WL._malloc(SYNTH_REQ_SIZE);
+			if (!reqPtr) continue;
+			pointersToFree.push(reqPtr);
+
+			const samplePtr = WL._malloc(u.pcm.length * 8);
+			if (!samplePtr) continue;
+			pointersToFree.push(samplePtr);
+
+			WL.HEAPF64.set(u.pcm, samplePtr >> 3);
+
+			const sv = (off: number, val: number, type: string) => WL.setValue(reqPtr + off, val, type);
+			sv(0, FS, "i32");
+			sv(4, u.pcm.length, "i32");
+			sv(8, samplePtr, "*");
+			sv(12, 0, "i32");
+			sv(16, 0, "*");
+			// Use a dummy midi note based on 440Hz, as actual pitch is set via curves later
+			sv(20, 69, "i32"); 
+			sv(24, 100.0, "double");
+			sv(32, 0.0, "double");
+			sv(40, u.lengthMs, "double");
+			sv(48, u.consonantMs, "double");
+			const cutMs = u.cutMs ?? (WL_FRAME_MS * 2);
+			sv(56, cutMs, "double");
+			sv(64, 100.0, "double");
+			sv(72, 0.0, "double");
+			sv(80, tempo, "double");
+			sv(88, 0, "i32");
+			sv(92, 0, "*");
+			sv(96, 0, "i32");
+			sv(100, 0, "i32");
+			sv(104, 100, "i32");
+			sv(108, 0, "i32");
+			sv(112, 0, "i32");
+			sv(116, 100, "i32");
+
+			WL._PhraseSynthAddRequest(ps, reqPtr, u.posMs, u.skipMs, u.lengthMs, u.fadeInMs, u.fadeOutMs, 0);
+		}
+
+		totalMs += WL_FRAME_MS * 2;
+		const nFrames = Math.ceil(totalMs / WL_FRAME_MS) + 4;
+		const f0Arr = new Float64Array(nFrames);
+		const gArr = new Float64Array(nFrames);
+		const tArr = new Float64Array(nFrames);
+		const bArr = new Float64Array(nFrames);
+		const vArr = new Float64Array(nFrames);
+		
+		for (let i = 0; i < nFrames; i++) {
+			const tMs = i * WL_FRAME_MS;
+			f0Arr[i] = sampleCurve(tMs, pitch, totalMs);
+			gArr[i] = sampleCurve(tMs, gender, totalMs);
+			tArr[i] = sampleCurve(tMs, tension, totalMs);
+			bArr[i] = sampleCurve(tMs, breathiness, totalMs);
+			vArr[i] = sampleCurve(tMs, voicing, totalMs);
+		}
+
+		const f0Ptr = WL._malloc(nFrames * 8);
+		const gPtr = WL._malloc(nFrames * 8);
+		const tPtr = WL._malloc(nFrames * 8);
+		const bPtr = WL._malloc(nFrames * 8);
+		const vPtr = WL._malloc(nFrames * 8);
+		
+		if (f0Ptr && gPtr && tPtr && bPtr && vPtr) {
+			WL.HEAPF64.set(f0Arr, f0Ptr >> 3);
+			WL.HEAPF64.set(gArr, gPtr >> 3);
+			WL.HEAPF64.set(tArr, tPtr >> 3);
+			WL.HEAPF64.set(bArr, bPtr >> 3);
+			WL.HEAPF64.set(vArr, vPtr >> 3);
+			WL._PhraseSynthSetCurves(ps, f0Ptr, gPtr, tPtr, bPtr, vPtr, nFrames, WL_FRAME_MS);
+		}
+		
+		if (f0Ptr) WL._free(f0Ptr);
+		if (gPtr) WL._free(gPtr);
+		if (tPtr) WL._free(tPtr);
+		if (bPtr) WL._free(bPtr);
+		if (vPtr) WL._free(vPtr);
+
+		const yPtrPtr = WL._malloc(4);
+		let audio = null;
+		if (yPtrPtr) {
+			const outLen = WL._PhraseSynthSynth(ps, yPtrPtr, 0);
+			const yPtr = WL.getValue(yPtrPtr, "*");
+			if (outLen > 0 && yPtr) {
+				audio = new Float32Array(WL.HEAPF32.buffer, yPtr, outLen).slice();
+				WL._free(yPtr);
+			}
+			WL._free(yPtrPtr);
+		}
+
+		for (const ptr of pointersToFree) {
+			WL._free(ptr);
+		}
+		WL._PhraseSynthDelete(ps);
+
+		return audio;
+	}
+
 	renderNote(params: RenderNoteParams): Float32Array | null {
 		const {
 			pcm,

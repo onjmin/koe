@@ -1,0 +1,1112 @@
+package tts
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"utautts/internal/audio"
+	"utautts/internal/connection"
+	"utautts/internal/engine"
+	"utautts/internal/frontend"
+	"utautts/internal/jsut"
+	"utautts/internal/openjtalk"
+	"utautts/internal/plan"
+	"utautts/internal/plugin"
+	"utautts/internal/prosody"
+	"utautts/internal/render"
+	"utautts/internal/voicebank"
+)
+
+type Config struct {
+	WordBoundaryEnvelope    bool
+	SpeechProsodyExperiment string
+	SpeechTiming            bool
+	Context                 context.Context
+	Engine                  engine.ResolvedEngine
+	VoicebankPath           string
+	Voicebank               *voicebank.Bank
+	Text                    string
+	Reading                 string
+	Language                string
+	Phonemizer              string
+	Dictionary              map[string]string
+	Tone                    string
+	Color                   string
+	MoraDurationMS          float64
+	PauseDurationMS         float64
+	MoraDurationsMS         []float64
+	UnitOverrides           []plan.UnitOverride
+	ReleaseMS               float64
+	ReleaseSet              bool
+	LeadingPreutteranceMS   float64
+	ProsodyModelPath        string
+	ProsodyModel            *prosody.Model
+	ManualPitchPath         string
+	ManualPitch             *prosody.ManualPitchFile
+	ProsodyFeatures         []prosody.FeatureFrame
+	ProsodyPitchOnly        bool
+	OpenJTalkPath           string
+	OpenJTalkDictionaryPath string
+	PitchFactors            []float64
+	ApplyPitch              bool
+	IntonationStrength      float64
+	Renderer                string
+	RendererCapabilities    *plugin.Capabilities
+	BoundaryBridgeMS        float64
+	BoundaryBridgeThreshold float64
+	CVVCTiming              string
+	CVVCTransitionGain      float64
+	CVVCPreBoundaryFade     bool
+	PitchCurve              *render.PitchCurve
+	AliasPolicy             voicebank.AliasPolicy
+	JoinModelPath           string
+	JoinModel               *connection.JoinModel
+	TargetPriorPath         string
+	TargetPrior             *jsut.Prior
+	TargetPriorStrength     float64
+	TargetPriorMinContext   int
+}
+
+type Result struct {
+	Voicebank       *voicebank.Bank
+	Plan            *plan.Plan
+	Audio           *audio.PCM
+	RenderReport    *render.RenderReport
+	MoraDurationsMS []float64
+	MoraPositionsMS []float64
+	PitchPoints     []float64
+}
+
+// RenderedPlanはレンダラー診断を含む出力用コピーを返す。元の選択計画は変えない。
+func (result *Result) RenderedPlan() *plan.Plan {
+	if result == nil {
+		return nil
+	}
+	rendered := plan.Clone(result.Plan)
+	if rendered != nil && result.RenderReport != nil {
+		result.RenderReport.ApplyTo(rendered)
+	}
+	return rendered
+}
+
+type ProsodyPreview struct {
+	Reading         string
+	Morae           []frontend.Mora
+	Features        []prosody.FeatureFrame
+	MoraDurationsMS []float64
+	MoraPositionsMS []float64
+	PitchPoints     []float64
+	// FramePitchCurveは強度適用後の10ms単位のピッチ曲線。
+	FramePitchCurve *render.PitchCurve
+}
+
+// ConvertToReadingは日本語テキストをかなへ変換し、必要ならOpen JTalkを使う。
+func ConvertToReading(text string, dictionary map[string]string, openJTalk openjtalk.Config) (string, error) {
+	return ConvertToReadingContext(context.Background(), text, dictionary, openJTalk)
+}
+
+func ConvertToReadingContext(ctx context.Context, text string, dictionary map[string]string, openJTalk openjtalk.Config) (string, error) {
+	if err := synthesisContextError(ctx); err != nil {
+		return "", err
+	}
+	reading, frontendErr := frontend.ToKanaWithDictionary(text, dictionary)
+	if frontendErr == nil {
+		return reading, nil
+	}
+	analysis, openJTalkErr := analyzeOpenJTalkCached(ctx, frontend.ApplyDictionaryForAnalysis(text, dictionary), openJTalk)
+	if openJTalkErr != nil {
+		return "", fmt.Errorf("convert text to reading: %v; Open JTalk fallback: %w", frontendErr, openJTalkErr)
+	}
+	return analysis.Reading, nil
+}
+
+func resolveReading(cfg Config) (string, error) {
+	if cfg.Reading != "" {
+		return cfg.Reading, nil
+	}
+	return ConvertToReadingContext(cfg.Context, cfg.Text, cfg.Dictionary, openjtalk.Config{
+		HelperPath: cfg.OpenJTalkPath, DictionaryPath: cfg.OpenJTalkDictionaryPath,
+	})
+}
+
+// ResolvePronunciationは発音解析を行う。音源固有のpresamp設定も利用する。
+func ResolvePronunciation(cfg Config) (string, string, string, []frontend.Mora, error) {
+	return resolvePronunciation(cfg)
+}
+
+func resolvePronunciation(cfg Config) (string, string, string, []frontend.Mora, error) {
+	language, phonemizer, err := frontend.ResolveLanguage(cfg.Language, cfg.Phonemizer)
+	if err != nil {
+		return "", "", "", nil, err
+	}
+	switch phonemizer {
+	case frontend.PhonemizerJapanese:
+		reading, err := resolveReading(cfg)
+		if err != nil {
+			return "", "", "", nil, err
+		}
+		morae, err := frontend.ParseKana(reading)
+		if cfg.SpeechTiming {
+			japaneseSpeechPhones(morae)
+		}
+		return language, phonemizer, reading, morae, err
+	case frontend.PhonemizerEnglish:
+		reading, morae, err := frontend.ParseEnglishARPAsing(cfg.Text, cfg.Reading, cfg.Dictionary)
+		return language, phonemizer, reading, morae, err
+	case frontend.PhonemizerEnglishDelta:
+		var presamp frontend.PresampConfig
+		if cfg.Voicebank != nil {
+			presamp = cfg.Voicebank.Presamp.FrontendConfig()
+		}
+		reading, morae, err := frontend.ParseEnglishDeltaWithConfig(cfg.Text, cfg.Reading, cfg.Dictionary, presamp)
+		return language, phonemizer, reading, morae, err
+	case frontend.PhonemizerEnglishVCCV:
+		reading, morae, err := frontend.ParseEnglishVCCV(cfg.Text, cfg.Reading, cfg.Dictionary)
+		return language, phonemizer, reading, morae, err
+	case frontend.PhonemizerChinese:
+		var presamp frontend.PresampConfig
+		if cfg.Voicebank != nil {
+			presamp = cfg.Voicebank.Presamp.FrontendConfig()
+		}
+		reading, morae, err := frontend.ParseChineseCVVCWithConfig(cfg.Text, cfg.Reading, cfg.Dictionary, presamp)
+		return language, phonemizer, reading, morae, err
+	default:
+		return "", "", "", nil, fmt.Errorf("unsupported phonemizer %q", phonemizer)
+	}
+}
+
+func resolveProsodyModel(cfg Config) (*prosody.Model, error) {
+	if cfg.ProsodyModel != nil {
+		return cfg.ProsodyModel, nil
+	}
+	if cfg.ProsodyModelPath == "" {
+		return nil, nil
+	}
+	return loadProsodyModelCached(cfg.ProsodyModelPath)
+}
+
+func resolveProsodyModelForLanguage(cfg Config, language string) (*prosody.Model, error) {
+	model, err := resolveProsodyModel(cfg)
+	if err != nil || model == nil || model.SupportsLanguage(language) {
+		return model, err
+	}
+	if language != frontend.LanguageEnglish || cfg.ProsodyModel != nil || cfg.ProsodyModelPath == "" {
+		return nil, nil
+	}
+	// 既定の日本語モデルが選ばれていても同じ models ディレクトリの英語モデルを使う
+	path := filepath.Join(filepath.Dir(cfg.ProsodyModelPath), "english-intonation-v1.json")
+	if _, statErr := os.Stat(path); statErr != nil {
+		if os.IsNotExist(statErr) {
+			return nil, nil
+		}
+		return nil, statErr
+	}
+	return loadProsodyModelCached(path)
+}
+
+// resolveProsodyFeaturesは未指定のアクセント特徴をOpen JTalkで補う。
+func resolveProsodyFeatures(cfg Config, model *prosody.Model, morae []frontend.Mora, reading string) ([]prosody.FeatureFrame, error) {
+	if model == nil || !model.RequiresExternalFeatures() || len(cfg.ProsodyFeatures) > 0 {
+		return cfg.ProsodyFeatures, nil
+	}
+	runtimeText := frontend.ApplyDictionaryForAnalysis(cfg.Text, cfg.Dictionary)
+	if strings.TrimSpace(runtimeText) == "" {
+		// かなだけの入力では読みを表層テキストとして解析する。
+		runtimeText = reading
+	}
+	runtimeConfig := openjtalk.Config{
+		HelperPath: cfg.OpenJTalkPath, DictionaryPath: cfg.OpenJTalkDictionaryPath,
+	}
+	aligned, alignmentErr := analyzeAndAlignRuntimeFeatures(cfg.Context, morae, runtimeText, runtimeConfig)
+	if alignmentErr == nil {
+		return aligned, nil
+	}
+	fallback, fallbackErr := analyzeAndAlignRuntimeFeatures(cfg.Context, morae, reading, runtimeConfig)
+	if fallbackErr != nil {
+		return nil, fmt.Errorf("align runtime prosody features: %v; Open JTalk fallback: %w", alignmentErr, fallbackErr)
+	}
+	return fallback, nil
+}
+
+func analyzeAndAlignRuntimeFeatures(ctx context.Context, morae []frontend.Mora, text string, cfg openjtalk.Config) ([]prosody.FeatureFrame, error) {
+	analysis, err := analyzeOpenJTalkCached(ctx, text, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("analyze runtime prosody features: %w", err)
+	}
+	return alignRuntimeProsodyFeatures(morae, analysis)
+}
+
+// ResolveRendererはrendererIDを解決する。
+func ResolveRenderer(catalog *plugin.Catalog, rendererID string) (engine.ResolvedEngine, error) {
+	return ResolveRendererWithOptions(catalog, rendererID, engine.ResolveOptions{})
+}
+
+// ResolveRendererWithOptionsは資源上書きを適用してからRendererを検査する。
+func ResolveRendererWithOptions(catalog *plugin.Catalog, rendererID string, options engine.ResolveOptions) (engine.ResolvedEngine, error) {
+	if catalog == nil {
+		return engine.ResolvedEngine{}, errors.New("renderer catalog is not initialized")
+	}
+	resolver := engine.NewResolver(engine.BuiltinRegistry())
+	return resolver.ResolveWithOptions(engine.DefinitionsFromCatalog(catalog), rendererID, options)
+}
+
+// ApplyRendererは表示用IDを解決し、解決済みEngineをConfigへ保存する。
+func ApplyRenderer(cfg *Config, catalog *plugin.Catalog, rendererID, worldlineBridgePath string) (string, error) {
+	resolved, err := ResolveRendererWithOptions(catalog, rendererID, engine.ResolveOptions{
+		ResourceOverrides: map[engine.ResourceKey]string{
+			engine.ResourceWorldlineBridge: worldlineBridgePath,
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	ApplyResolvedEngine(cfg, resolved)
+	return string(resolved.PublicID()), nil
+}
+
+// ApplyResolvedEngineは解決済みEngineをprovider境界として保存する。
+func ApplyResolvedEngine(cfg *Config, resolved engine.ResolvedEngine) {
+	cfg.Engine = resolved
+	capabilities := plugin.Capabilities{
+		FramePitch:     resolved.Definition.Capabilities.FramePitch,
+		BoundaryBridge: resolved.Definition.Capabilities.BoundaryBridge,
+	}
+	cfg.Renderer = string(resolved.Provider.ID)
+	cfg.RendererCapabilities = &capabilities
+}
+
+func Synthesize(cfg Config) (*Result, error) {
+	return SynthesizeWithOptions(cfg, render.ProviderOptions{})
+}
+
+// SynthesizeWithOptionsは選択したproviderの設定で共通TTS処理を実行する。
+func SynthesizeWithOptions(cfg Config, providerOptions render.ProviderOptions) (*Result, error) {
+	if err := synthesisContextError(cfg.Context); err != nil {
+		return nil, err
+	}
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
+	}
+	providerID := engine.ProviderID(cfg.Renderer)
+	if cfg.Engine.Provider.ID != "" {
+		providerID = cfg.Engine.Provider.ID
+	}
+	if synthesizer, found := neuralSynthesizerForProvider(providerID); found {
+		return synthesizer.Synthesize(cfg)
+	}
+	bank := cfg.Voicebank
+	var err error
+	if bank == nil {
+		bank, err = loadVoicebankCached(cfg.VoicebankPath)
+		if err != nil {
+			return nil, fmt.Errorf("load voicebank: %w", err)
+		}
+	}
+	cfg.Voicebank = bank
+	joinModel, err := resolveJoinModel(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("load join model: %w", err)
+	}
+	requestedAliasPolicy := cfg.AliasPolicy
+	if requestedAliasPolicy == "" {
+		requestedAliasPolicy = voicebank.AliasPolicyAuto
+	}
+	applyAliasProfile(bank, &cfg)
+	if len(bank.ARPAsing) > 0 {
+		dictionary := make(map[string]string, len(bank.ARPAsing)+len(cfg.Dictionary))
+		for key, value := range bank.ARPAsing {
+			dictionary[key] = value
+		}
+		for key, value := range cfg.Dictionary {
+			dictionary[key] = value
+		}
+		cfg.Dictionary = dictionary
+	}
+	language, phonemizer, reading, morae, err := resolvePronunciation(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("phonemize: %w", err)
+	}
+	targetPrior, err := resolveTargetPrior(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if targetPrior != nil {
+		if language != frontend.LanguageJapanese {
+			return nil, fmt.Errorf("target prior supports Japanese only, got %q", language)
+		}
+		japaneseSpeechPhones(morae)
+	}
+	applyLanguageSpeechProfile(language, &cfg)
+	loadedProsody, err := resolveProsodyModelForLanguage(cfg, language)
+	if err != nil {
+		return nil, fmt.Errorf("load prosody model: %w", err)
+	}
+	prosodyFeatures, err := resolveProsodyFeatures(cfg, loadedProsody, morae, reading)
+	if err != nil {
+		return nil, err
+	}
+	selections, err := bank.ResolveWithConfig(morae, voicebank.ResolveConfig{
+		Tone: cfg.Tone, Color: cfg.Color, AliasPolicy: cfg.AliasPolicy, JoinModel: joinModel,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("resolve voicebank units: %w", err)
+	}
+	phoneWeights := [][]float64(nil)
+	phoneTimingSource := ""
+	if language == frontend.LanguageJapanese && !cfg.SpeechTiming && targetPrior == nil && voicebank.IsSingleCVSelections(selections) {
+		japaneseSpeechPhones(morae)
+	}
+	if shouldUseLanguagePhoneTiming(language, cfg.SpeechTiming, targetPrior != nil, voicebank.IsSingleCVSelections(selections)) {
+		phoneWeights = languagePhoneWeights(language, morae)
+		phoneTimingSource = "language-phone-v1"
+	}
+	if targetPrior != nil {
+		strength := cfg.TargetPriorStrength
+		if strength <= 0 {
+			strength = 1
+		}
+		phoneWeights = targetPriorPhoneWeights(targetPrior, morae, strength, cfg.TargetPriorMinContext)
+		phoneTimingSource = "jsut-target-prior"
+	}
+	var predictions []prosody.Prediction
+	if language == frontend.LanguageEnglish {
+		predictions = englishPredictions(morae)
+	} else if language == frontend.LanguageChinese {
+		predictions = mandarinPredictions(morae)
+	}
+	if experimentalSpeechTiming(cfg) {
+		predictions = speechRhythmExperiment(morae, predictions, cfg.MoraDurationsMS)
+	}
+	if loadedProsody != nil {
+		if loadedProsody.RequiresExternalFeatures() && len(prosodyFeatures) != len(morae) {
+			return nil, fmt.Errorf("prosody model %d/%s requires %d mora-level accent feature frames, got %d", loadedProsody.Version, loadedProsody.Mode, len(morae), len(prosodyFeatures))
+		}
+		predictions = loadedProsody.PredictWithFeatures(morae, prosodyFeatures)
+		if cfg.ProsodyPitchOnly {
+			for i := range predictions {
+				predictions[i].DurationMS = 0
+				predictions[i].DurationFactor = 1
+				predictions[i].EnergyFactor = 1
+			}
+		}
+	}
+	if language == frontend.LanguageJapanese {
+		predictions = applyJapaneseSpeechRhythm(cfg, loadedProsody, morae, predictions)
+	}
+	if len(cfg.PitchFactors) > 0 {
+		if len(cfg.PitchFactors) != len(morae) {
+			return nil, fmt.Errorf("pitch factors: got %d values for %d morae", len(cfg.PitchFactors), len(morae))
+		}
+		if len(predictions) == 0 {
+			predictions = make([]prosody.Prediction, len(morae))
+			for i := range predictions {
+				predictions[i].DurationFactor = 1
+				predictions[i].EnergyFactor = 1
+			}
+		}
+		for i, factor := range cfg.PitchFactors {
+			if factor <= 0 {
+				return nil, fmt.Errorf("pitch factors: value %d is %.4f, want positive", i, factor)
+			}
+			predictions[i].PitchFactor = factor
+		}
+	}
+	synthesisPlan, err := plan.Build(bank, reading, morae, selections, plan.Config{
+		SpeechTiming:       cfg.SpeechTiming,
+		MoraDurationMS:     cfg.MoraDurationMS,
+		PauseDurationMS:    cfg.PauseDurationMS,
+		MoraDurationsMS:    cfg.MoraDurationsMS,
+		PhoneWeights:       phoneWeights,
+		PhoneWeightsSource: phoneTimingSource,
+		Predictions:        predictions,
+		AliasPolicy:        cfg.AliasPolicy,
+		Tone:               cfg.Tone,
+		Color:              cfg.Color,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("build synthesis plan: %w", err)
+	}
+	if err := plan.ApplyUnitOverrides(synthesisPlan.Units, cfg.UnitOverrides); err != nil {
+		return nil, fmt.Errorf("apply unit overrides: %w", err)
+	}
+	synthesisPlan.WordBoundaryEnvelope = cfg.WordBoundaryEnvelope
+	synthesisPlan.Text = cfg.Text
+	synthesisPlan.Language = language
+	synthesisPlan.Phonemizer = phonemizer
+	synthesisPlan.RequestedAliasPolicy = string(requestedAliasPolicy)
+	if joinModel != nil {
+		synthesisPlan.JoinCostMode = "learned"
+		synthesisPlan.JoinModelID = joinModel.ID
+	}
+	synthesisPlan.CVVCTiming = cfg.CVVCTiming
+	synthesisPlan.CVVCTransitionGain = cfg.CVVCTransitionGain
+	synthesisPlan.CVVCPreBoundaryFade = cfg.CVVCPreBoundaryFade
+	pitchCurve := cfg.PitchCurve
+	applyPitch := applyPitchEnabled(cfg)
+	if pitchCurve == nil && language == frontend.LanguageEnglish && applyPitch && !shouldPredictFrameContour(cfg, loadedProsody) {
+		pitchCurve = scaleAutomaticPitchCurve(englishSpeechCurve(morae, moraTimings(morae, synthesisPlan), synthesisPlan.DurationMS+cfg.ReleaseMS, cfg.Text), cfg.IntonationStrength)
+	}
+	if pitchCurve == nil && language == frontend.LanguageChinese {
+		timings := moraTimings(morae, synthesisPlan)
+		pitchCurve = mandarinToneCurve(morae, timings, synthesisPlan.DurationMS+cfg.ReleaseMS)
+		if pitchCurve != nil {
+			applyPitch = true
+		}
+	}
+	if pitchCurve == nil && shouldPredictFrameContour(cfg, loadedProsody) {
+		timings := moraTimings(morae, synthesisPlan)
+		question := finalPhraseIsQuestion(cfg.Text)
+		if contour := loadedProsody.PredictFrameContour(morae, prosodyFeatures, timings, synthesisPlan.DurationMS+cfg.ReleaseMS, question); contour != nil {
+			pitchCurve = &render.PitchCurve{FrameMS: contour.FrameMS, Cents: contour.Cents}
+			pitchCurve = scaleAutomaticPitchCurve(pitchCurve, cfg.IntonationStrength)
+		}
+	}
+	if cfg.PitchCurve == nil && experimentalSpeechPitch(cfg) && applyPitch {
+		pitchCurve = speechPitchExperiment(language, morae, moraTimings(morae, synthesisPlan), synthesisPlan.DurationMS+cfg.ReleaseMS, cfg.Text, cfg.IntonationStrength)
+	}
+	automaticPitchCurve := pitchCurve
+	manualPitch := cfg.ManualPitch
+	if manualPitch == nil && cfg.ManualPitchPath != "" {
+		manualPitch, err = prosody.LoadManualPitch(cfg.ManualPitchPath)
+		if err != nil {
+			return nil, fmt.Errorf("load manual pitch: %w", err)
+		}
+	}
+	if manualPitch != nil {
+		if err := manualPitch.Validate(); err != nil {
+			return nil, fmt.Errorf("validate manual pitch: %w", err)
+		}
+		if manualPitch.Reading != "" && manualPitch.Reading != reading {
+			return nil, fmt.Errorf("manual pitch reading does not match synthesis reading")
+		}
+		timings := moraTimings(morae, synthesisPlan)
+		manualContour, curveErr := manualPitch.Curve(morae, timings, synthesisPlan.DurationMS+cfg.ReleaseMS)
+		if curveErr != nil {
+			return nil, fmt.Errorf("build manual pitch curve: %w", curveErr)
+		}
+		pitchCurve = mergeManualPitchCurve(pitchCurve, manualContour, manualPitch.Mode)
+		pitchCurve = render.ConstrainPitchCurve(pitchCurve, 20, 8)
+	}
+	intonationStrength := rendererIntonationStrength(cfg, automaticPitchCurve)
+	providerOptions.Worldline.SpeechPitchReference = experimentalSpeechPitch(cfg) && applyPitch
+	rendered, err := render.RenderWithReport(synthesisPlan, render.Config{
+		Context:                 cfg.Context,
+		Engine:                  cfg.Engine,
+		ReleaseMS:               cfg.ReleaseMS,
+		ReleaseSet:              cfg.ReleaseSet,
+		LeadingPreutteranceMS:   cfg.LeadingPreutteranceMS,
+		IntonationStrength:      intonationStrength,
+		ApplyPitch:              applyPitch,
+		Backend:                 cfg.Renderer,
+		ProviderOptions:         providerOptions,
+		BoundaryBridgeMS:        cfg.BoundaryBridgeMS,
+		BoundaryBridgeThreshold: cfg.BoundaryBridgeThreshold,
+		CVVCTiming:              cfg.CVVCTiming,
+		CVVCTransitionGain:      cfg.CVVCTransitionGain,
+		CVVCPreBoundaryFade:     cfg.CVVCPreBoundaryFade,
+		PitchCurve:              pitchCurve,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("render: %w", err)
+	}
+	pcm := rendered.Audio
+	timings := moraTimings(morae, synthesisPlan)
+	moraDurations := make([]float64, len(timings))
+	moraPositions := make([]float64, len(timings))
+	pitchPoints := make([]float64, len(timings))
+	for index, timing := range timings {
+		moraDurations[index] = timing.DurationMS
+		moraPositions[index] = timing.StartMS + timing.DurationMS/2
+		if automaticPitchCurve != nil && !morae[index].Pause {
+			pitchPoints[index] = pitchCurveCentsAt(automaticPitchCurve, moraPositions[index])
+		}
+	}
+	return &Result{
+		Voicebank:       bank,
+		Plan:            synthesisPlan,
+		Audio:           pcm,
+		RenderReport:    &rendered.Report,
+		MoraDurationsMS: moraDurations,
+		MoraPositionsMS: moraPositions,
+		PitchPoints:     pitchPoints,
+	}, nil
+}
+
+func resolveJoinModel(cfg Config) (*connection.JoinModel, error) {
+	if cfg.JoinModel != nil {
+		if err := cfg.JoinModel.Validate(); err != nil {
+			return nil, err
+		}
+		return cfg.JoinModel, nil
+	}
+	if strings.TrimSpace(cfg.JoinModelPath) == "" {
+		return nil, nil
+	}
+	return connection.LoadJoinModel(cfg.JoinModelPath)
+}
+
+func applyAliasProfile(bank *voicebank.Bank, cfg *Config) {
+	policy := cfg.AliasPolicy
+	if policy == "" {
+		policy = voicebank.AliasPolicyAuto
+	}
+	if cfg.CVVCTiming == "" {
+		cfg.CVVCTiming = render.CVVCTimingSequential
+	}
+	switch policy {
+	case voicebank.AliasPolicyAuto:
+		if bank != nil && bank.RecommendCVVCEnhanced() {
+			applyCVVCEnhancedProfile(cfg)
+		}
+	case voicebank.AliasPolicyEnhanced:
+		applyCVVCEnhancedProfile(cfg)
+	}
+}
+
+func applyCVVCEnhancedProfile(cfg *Config) {
+	cfg.AliasPolicy = voicebank.AliasPolicyCVVCPrefer
+	cfg.CVVCTiming = render.CVVCTimingSequential
+	cfg.CVVCTransitionGain = 0.35
+	cfg.CVVCPreBoundaryFade = false
+}
+
+func applyLanguageSpeechProfile(language string, cfg *Config) {
+	if cfg == nil || language != frontend.LanguageEnglish {
+		return
+	}
+	// 英語の語境界では遷移音を少し強める
+	if cfg.AliasPolicy == voicebank.AliasPolicyCVVCPrefer && cfg.CVVCTransitionGain == 0.35 {
+		cfg.CVVCTransitionGain = 0.55
+	}
+}
+
+// PredictProsodyは音声合成せずに選択されたプロソディモデルを評価する。手動のモーラ長を尊重するため、プレビューはGUIで編集中の値に従う。
+func PredictProsody(cfg Config) (*ProsodyPreview, error) {
+	if err := synthesisContextError(cfg.Context); err != nil {
+		return nil, err
+	}
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
+	}
+	if cfg.MoraDurationMS <= 0 {
+		cfg.MoraDurationMS = 120
+	}
+	if cfg.PauseDurationMS < 0 {
+		cfg.PauseDurationMS = 180
+	}
+	if cfg.ReleaseMS <= 0 && !cfg.ReleaseSet {
+		cfg.ReleaseMS = 20
+	}
+
+	language, _, reading, morae, err := resolvePronunciation(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("phonemize: %w", err)
+	}
+	loadedProsody, err := resolveProsodyModelForLanguage(cfg, language)
+	if err != nil {
+		return nil, fmt.Errorf("load prosody model: %w", err)
+	}
+
+	prosodyFeatures, err := resolveProsodyFeatures(cfg, loadedProsody, morae, reading)
+	if err != nil {
+		return nil, err
+	}
+
+	var predictions []prosody.Prediction
+	if language == frontend.LanguageEnglish {
+		predictions = englishPredictions(morae)
+	} else if language == frontend.LanguageChinese {
+		predictions = mandarinPredictions(morae)
+	}
+	if experimentalSpeechTiming(cfg) {
+		predictions = speechRhythmExperiment(morae, predictions, cfg.MoraDurationsMS)
+	}
+	if loadedProsody != nil {
+		if loadedProsody.RequiresExternalFeatures() && len(prosodyFeatures) != len(morae) {
+			return nil, fmt.Errorf("prosody model %d/%s requires %d mora-level accent feature frames, got %d", loadedProsody.Version, loadedProsody.Mode, len(morae), len(prosodyFeatures))
+		}
+		predictions = loadedProsody.PredictWithFeatures(morae, prosodyFeatures)
+	}
+
+	if language == frontend.LanguageJapanese {
+		predictions = applyJapaneseSpeechRhythm(cfg, loadedProsody, morae, predictions)
+	}
+	timings := make([]prosody.MoraTiming, len(morae))
+	if loadedProsody != nil && cfg.ProsodyPitchOnly {
+		for i := range predictions {
+			predictions[i].DurationFactor = 1
+		}
+	}
+	result := &ProsodyPreview{
+		Reading: reading, Morae: append([]frontend.Mora(nil), morae...),
+		Features:        append([]prosody.FeatureFrame(nil), prosodyFeatures...),
+		MoraDurationsMS: make([]float64, len(morae)),
+		MoraPositionsMS: make([]float64, len(morae)),
+		PitchPoints:     make([]float64, len(morae)),
+	}
+	cursor := 0.0
+	for index, mora := range morae {
+		duration, manuallySet := previewConfiguredMoraDuration(index, cfg)
+		if !manuallySet {
+			if mora.Pause {
+				duration = cfg.PauseDurationMS
+			} else {
+				duration = previewDurationFor(mora, cfg.MoraDurationMS)
+				if index < len(predictions) && predictions[index].DurationFactor > 0 {
+					duration *= predictions[index].DurationFactor
+				}
+			}
+		}
+		duration = math.Max(0, duration)
+		timings[index] = prosody.MoraTiming{StartMS: cursor, DurationMS: duration}
+		result.MoraDurationsMS[index] = duration
+		result.MoraPositionsMS[index] = cursor + duration/2
+		cursor += duration
+	}
+
+	if language == frontend.LanguageChinese {
+		result.FramePitchCurve = mandarinToneCurve(morae, timings, cursor+cfg.ReleaseMS)
+	}
+	if language == frontend.LanguageEnglish && applyPitchEnabled(cfg) && !shouldPredictFrameContour(cfg, loadedProsody) {
+		result.FramePitchCurve = scaleAutomaticPitchCurve(englishSpeechCurve(morae, timings, cursor+cfg.ReleaseMS, cfg.Text), cfg.IntonationStrength)
+	}
+	if experimentalSpeechPitch(cfg) && (language == frontend.LanguageChinese || applyPitchEnabled(cfg)) {
+		result.FramePitchCurve = speechPitchExperiment(language, morae, timings, cursor+cfg.ReleaseMS, cfg.Text, cfg.IntonationStrength)
+	}
+	if result.FramePitchCurve == nil && shouldPredictFrameContour(cfg, loadedProsody) {
+		question := finalPhraseIsQuestion(cfg.Text)
+		if contour := loadedProsody.PredictFrameContour(morae, prosodyFeatures, timings, cursor+cfg.ReleaseMS, question); contour != nil {
+			curve := scaleAutomaticPitchCurve(&render.PitchCurve{FrameMS: contour.FrameMS, Cents: contour.Cents}, cfg.IntonationStrength)
+			result.FramePitchCurve = curve
+		}
+	}
+	if result.FramePitchCurve != nil {
+		for index, mora := range morae {
+			if !mora.Pause {
+				result.PitchPoints[index] = pitchCurveCentsAt(result.FramePitchCurve, result.MoraPositionsMS[index])
+			}
+		}
+	}
+	return result, nil
+}
+
+func synthesisContextError(ctx context.Context) error {
+	if ctx == nil {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return fmt.Errorf("synthesis canceled: %w", ctx.Err())
+	default:
+		return nil
+	}
+}
+
+func previewDurationFor(mora frontend.Mora, base float64) float64 {
+	if mora.DurationScale > 0 {
+		return base * mora.DurationScale
+	}
+	switch mora.Vowel {
+	case "n":
+		return base * 0.9
+	}
+	if mora.Text == "ー" {
+		return base * 1.2
+	}
+	return base
+}
+
+func previewConfiguredMoraDuration(position int, cfg Config) (float64, bool) {
+	if position < 0 || position >= len(cfg.MoraDurationsMS) {
+		return 0, false
+	}
+	duration := cfg.MoraDurationsMS[position]
+	if duration <= 0 {
+		return 0, false
+	}
+	return duration, true
+}
+
+func validateConfig(cfg Config) error {
+	if cfg.WordBoundaryEnvelope {
+		if err := validateMultilingualWorldExperiment(cfg); err != nil {
+			return err
+		}
+	}
+	if err := validateSpeechExperiment(cfg); err != nil {
+		return err
+	}
+	finite := map[string]float64{
+		"mora_duration_ms":          cfg.MoraDurationMS,
+		"pause_duration_ms":         cfg.PauseDurationMS,
+		"release_ms":                cfg.ReleaseMS,
+		"intonation_strength":       cfg.IntonationStrength,
+		"boundary_bridge_ms":        cfg.BoundaryBridgeMS,
+		"boundary_bridge_threshold": cfg.BoundaryBridgeThreshold,
+		"target_prior_strength":     cfg.TargetPriorStrength,
+	}
+	for name, value := range finite {
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return fmt.Errorf("%s must be finite, got %v", name, value)
+		}
+	}
+	for index, factor := range cfg.PitchFactors {
+		if math.IsNaN(factor) || math.IsInf(factor, 0) {
+			return fmt.Errorf("pitch factors: value %d must be finite, got %v", index, factor)
+		}
+	}
+	for index, duration := range cfg.MoraDurationsMS {
+		if math.IsNaN(duration) || math.IsInf(duration, 0) {
+			return fmt.Errorf("mora durations: value %d must be finite, got %v", index, duration)
+		}
+	}
+	if cfg.IntonationStrength < 0 || cfg.IntonationStrength > render.MaxIntonationStrength {
+		return fmt.Errorf("intonation_strength must be between 0 and %.0f, got %v", render.MaxIntonationStrength, cfg.IntonationStrength)
+	}
+	if cfg.ReleaseMS < 0 {
+		return fmt.Errorf("release_ms must be non-negative, got %v", cfg.ReleaseMS)
+	}
+	if cfg.TargetPriorStrength < 0 || cfg.TargetPriorStrength > 1 {
+		return fmt.Errorf("target_prior_strength must be between 0 and 1, got %v", cfg.TargetPriorStrength)
+	}
+	if cfg.TargetPriorMinContext < 0 {
+		return fmt.Errorf("target_prior_min_context must be non-negative, got %v", cfg.TargetPriorMinContext)
+	}
+	return nil
+}
+
+func mergeManualPitchCurve(base *render.PitchCurve, manual *prosody.PitchContour, mode string) *render.PitchCurve {
+	if manual == nil || manual.FrameMS <= 0 || len(manual.Cents) == 0 {
+		return base
+	}
+	result := &render.PitchCurve{FrameMS: manual.FrameMS, Cents: make([]float64, len(manual.Cents))}
+	for index := range result.Cents {
+		manualCents := manual.Cents[index]
+		if mode == "replace" {
+			result.Cents[index] = manualCents
+			continue
+		}
+		baseCents := 0.0
+		if base != nil && len(base.Cents) > 0 {
+			baseCents = pitchCurveCentsAt(base, float64(index)*manual.FrameMS)
+		}
+		result.Cents[index] = baseCents + manualCents
+	}
+	return result
+}
+
+func pitchCurveCentsAt(curve *render.PitchCurve, timeMS float64) float64 {
+	if curve == nil || curve.FrameMS <= 0 || len(curve.Cents) == 0 {
+		return 0
+	}
+	position := math.Max(0, timeMS) / curve.FrameMS
+	left := int(math.Floor(position))
+	if left >= len(curve.Cents)-1 {
+		return curve.Cents[len(curve.Cents)-1]
+	}
+	progress := position - float64(left)
+	return curve.Cents[left]*(1-progress) + curve.Cents[left+1]*progress
+}
+
+func alignRuntimeProsodyFeatures(morae []frontend.Mora, analysis *openjtalk.Analysis) ([]prosody.FeatureFrame, error) {
+	if analysis == nil {
+		return nil, fmt.Errorf("Open JTalk analysis is nil")
+	}
+	if len(analysis.Morae) != len(analysis.Features) {
+		return nil, fmt.Errorf("Open JTalk returned %d morae and %d feature frames", len(analysis.Morae), len(analysis.Features))
+	}
+	if len(morae) == 0 {
+		return nil, nil
+	}
+	if len(analysis.Morae) == 0 {
+		return make([]prosody.FeatureFrame, len(morae)), nil
+	}
+
+	indices := alignRuntimeMoraIndices(morae, analysis.Morae)
+	aligned := make([]prosody.FeatureFrame, len(morae))
+	for index, analyzedIndex := range indices {
+		if analyzedIndex >= 0 {
+			aligned[index] = cloneFeatureFrame(analysis.Features[analyzedIndex])
+			continue
+		}
+		if morae[index].Pause {
+			aligned[index] = prosody.FeatureFrame{}
+			continue
+		}
+		aligned[index] = cloneFeatureFrame(nearestRuntimeFeature(indices, analysis.Features, index))
+	}
+	return aligned, nil
+}
+
+type runtimeMoraAlignmentCell struct {
+	cost float64
+	op   byte
+}
+
+const (
+	runtimeAlignmentSkipCost   = 1.1
+	runtimeAlignmentChangeCost = 1.8
+)
+
+func alignRuntimeMoraIndices(morae []frontend.Mora, analyzed []string) []int {
+	rows := len(morae) + 1
+	columns := len(analyzed) + 1
+	cells := make([][]runtimeMoraAlignmentCell, rows)
+	for row := range cells {
+		cells[row] = make([]runtimeMoraAlignmentCell, columns)
+		for column := range cells[row] {
+			cells[row][column].cost = math.Inf(1)
+		}
+	}
+	cells[0][0] = runtimeMoraAlignmentCell{}
+	for row := 1; row < rows; row++ {
+		cells[row][0] = runtimeMoraAlignmentCell{
+			cost: cells[row-1][0].cost + runtimeAlignmentSkipCost,
+			op:   'g',
+		}
+	}
+	for column := 1; column < columns; column++ {
+		cells[0][column] = runtimeMoraAlignmentCell{
+			cost: cells[0][column-1].cost + runtimeAlignmentSkipCost,
+			op:   'o',
+		}
+	}
+	for row := 1; row < rows; row++ {
+		for column := 1; column < columns; column++ {
+			best := runtimeMoraAlignmentCell{
+				cost: cells[row-1][column-1].cost + runtimeMoraCost(morae[row-1], analyzed[column-1]),
+				op:   'm',
+			}
+			best = chooseRuntimeAlignment(best, runtimeMoraAlignmentCell{
+				cost: cells[row-1][column].cost + runtimeAlignmentSkipCost,
+				op:   'g',
+			})
+			best = chooseRuntimeAlignment(best, runtimeMoraAlignmentCell{
+				cost: cells[row][column-1].cost + runtimeAlignmentSkipCost,
+				op:   'o',
+			})
+			cells[row][column] = best
+		}
+	}
+
+	indices := make([]int, len(morae))
+	for index := range indices {
+		indices[index] = -1
+	}
+	row, column := len(morae), len(analyzed)
+	for row > 0 || column > 0 {
+		if row == 0 {
+			column--
+			continue
+		}
+		if column == 0 {
+			row--
+			continue
+		}
+		switch cells[row][column].op {
+		case 'm':
+			indices[row-1] = column - 1
+			row--
+			column--
+		case 'g':
+			row--
+		case 'o':
+			column--
+		default:
+			row--
+			column--
+		}
+	}
+	return indices
+}
+
+func chooseRuntimeAlignment(current, candidate runtimeMoraAlignmentCell) runtimeMoraAlignmentCell {
+	if candidate.cost < current.cost-1e-9 {
+		return candidate
+	}
+	if math.Abs(candidate.cost-current.cost) <= 1e-9 && runtimeAlignmentPriority(candidate.op) > runtimeAlignmentPriority(current.op) {
+		return candidate
+	}
+	return current
+}
+
+func runtimeAlignmentPriority(operation byte) int {
+	switch operation {
+	case 'm':
+		return 3
+	case 'o':
+		return 2
+	case 'g':
+		return 1
+	default:
+		return 0
+	}
+}
+
+func runtimeMoraCost(mora frontend.Mora, analyzed string) float64 {
+	if mora.Pause || analyzed == "" {
+		if mora.Pause && analyzed == "" {
+			return 0
+		}
+		return runtimeAlignmentChangeCost + runtimeAlignmentSkipCost
+	}
+	if mora.Text == analyzed {
+		return 0
+	}
+	if analyzed == "ー" && isRuntimeVowel(mora.Vowel) {
+		return 0.25
+	}
+	analyzedVowel := runtimeAnalyzedMoraVowel(analyzed)
+	if analyzedVowel != "" && analyzedVowel == mora.Vowel {
+		return 0.6
+	}
+	return runtimeAlignmentChangeCost
+}
+
+func isRuntimeVowel(vowel string) bool {
+	switch vowel {
+	case "a", "i", "u", "e", "o":
+		return true
+	default:
+		return false
+	}
+}
+
+func runtimeAnalyzedMoraVowel(analyzed string) string {
+	parsed, err := frontend.ParseKana(analyzed)
+	if err != nil || len(parsed) != 1 || parsed[0].Pause {
+		return ""
+	}
+	return parsed[0].Vowel
+}
+
+func nearestRuntimeFeature(indices []int, features []prosody.FeatureFrame, target int) prosody.FeatureFrame {
+	for distance := 1; distance < len(indices)+1; distance++ {
+		left := target - distance
+		if left >= 0 && indices[left] >= 0 {
+			return features[indices[left]]
+		}
+		right := target + distance
+		if right < len(indices) && indices[right] >= 0 {
+			return features[indices[right]]
+		}
+	}
+	return prosody.FeatureFrame{}
+}
+
+func cloneFeatureFrame(frame prosody.FeatureFrame) prosody.FeatureFrame {
+	if len(frame) == 0 {
+		return prosody.FeatureFrame{}
+	}
+	result := make(prosody.FeatureFrame, len(frame))
+	for name, value := range frame {
+		result[name] = value
+	}
+	return result
+}
+
+func moraTimings(morae []frontend.Mora, synthesisPlan *plan.Plan) []prosody.MoraTiming {
+	byPosition := make(map[int]plan.Unit, len(synthesisPlan.Units))
+	for _, unit := range synthesisPlan.Units {
+		if unit.Role == "transition" || unit.Role == "ending" {
+			continue
+		}
+		byPosition[unit.Position] = unit
+	}
+	timings := make([]prosody.MoraTiming, len(morae))
+	cursor := 0.0
+	for position := 0; position < len(morae); {
+		if unit, ok := byPosition[position]; ok {
+			cursor = unit.NoteStartMS
+			timings[position] = prosody.MoraTiming{StartMS: cursor, DurationMS: unit.DurationMS}
+			cursor += unit.DurationMS
+			position++
+			continue
+		}
+		nextPosition := position + 1
+		for nextPosition < len(morae) {
+			if _, ok := byPosition[nextPosition]; ok {
+				break
+			}
+			nextPosition++
+		}
+		nextStart := synthesisPlan.DurationMS
+		if nextPosition < len(morae) {
+			nextStart = byPosition[nextPosition].NoteStartMS
+		}
+		duration := math.Max(0, nextStart-cursor) / float64(nextPosition-position)
+		for position < nextPosition {
+			timings[position] = prosody.MoraTiming{StartMS: cursor, DurationMS: duration}
+			cursor += duration
+			position++
+		}
+	}
+	return timings
+}
+
+func rendererSupportsFramePitch(renderer string, capabilities *plugin.Capabilities) bool {
+	if capabilities != nil {
+		return capabilities.FramePitch
+	}
+	// 直接呼出し時も外部manifestだけを参照し、Go側の既定値は持たない。
+	directories, _ := plugin.DefaultDirectories()
+	items, _ := plugin.DiscoverRenderers(directories, nil)
+	for _, item := range items {
+		if item.ID == renderer || item.Provider == renderer {
+			return item.Capabilities.FramePitch
+		}
+	}
+	return false
+}
+
+func applyPitchEnabled(cfg Config) bool {
+	return cfg.ApplyPitch || cfg.ProsodyPitchOnly
+}
+
+func shouldPredictFrameContour(cfg Config, model *prosody.Model) bool {
+	return applyPitchEnabled(cfg) && model != nil && model.HasFrameContour() &&
+		rendererSupportsFramePitch(cfg.Renderer, cfg.RendererCapabilities)
+}
+
+func effectiveIntonationStrength(cfg Config) float64 {
+	if !applyPitchEnabled(cfg) {
+		return 0
+	}
+	return cfg.IntonationStrength
+}
+
+// 自動曲線使用時も音源由来の補正を弱く残す。
+const automaticSourceIntonationBlend = 0.25
+
+func rendererIntonationStrength(cfg Config, automatic *render.PitchCurve) float64 {
+	if automatic != nil {
+		if !applyPitchEnabled(cfg) {
+			return 0
+		}
+		return automaticSourceIntonationBlend
+	}
+	return effectiveIntonationStrength(cfg)
+}
+
+// scaleAutomaticPitchCurveは自動輪郭だけに強度を適用し、手動補正は増幅しない。
+func scaleAutomaticPitchCurve(curve *render.PitchCurve, strength float64) *render.PitchCurve {
+	if curve == nil || len(curve.Cents) == 0 {
+		return curve
+	}
+	if strength <= 0 {
+		return nil
+	}
+	if strength == 1 {
+		return curve
+	}
+	result := &render.PitchCurve{FrameMS: curve.FrameMS, Cents: make([]float64, len(curve.Cents))}
+	for index, cents := range curve.Cents {
+		result.Cents[index] = cents * strength
+	}
+	return result
+}

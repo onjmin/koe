@@ -1,0 +1,97 @@
+package frontend
+
+import (
+	"reflect"
+	"testing"
+)
+
+func TestParseKana(t *testing.T) {
+	got, err := ParseKana("コンニチハ、きょう。")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Mora{
+		{Text: "こ", Consonant: "k", Vowel: "o"},
+		{Text: "ん", Consonant: "n", Vowel: "n"},
+		{Text: "に", Consonant: "n", Vowel: "i"},
+		{Text: "ち", Consonant: "ch", Vowel: "i"},
+		{Text: "は", Consonant: "h", Vowel: "a"},
+		{Pause: true},
+		{Text: "きょ", Consonant: "ky", Vowel: "o"},
+		{Text: "う", Vowel: "u"},
+		{Pause: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("morae = %#v, want %#v", got, want)
+	}
+	t.Run("long-vowel", testParseKanaLongVowel)
+	t.Run("ellipsis-and-brackets", testParseKanaEllipsisAndBrackets)
+	t.Run("consonants", testParseKanaConsonants)
+	t.Run("unknown-character", testParseKanaIgnoresUnknownCharacter)
+}
+
+func testParseKanaLongVowel(t *testing.T) {
+	got, err := ParseKana("スーパー")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got[1], Mora{Text: "ー", Vowel: "u"}) || !reflect.DeepEqual(got[3], Mora{Text: "ー", Vowel: "a"}) {
+		t.Fatalf("morae = %#v", got)
+	}
+}
+
+func testParseKanaEllipsisAndBrackets(t *testing.T) {
+	got, err := ParseKana("ミナサン……（テスト）〜オハヨー〜")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Mora{
+		{Text: "み", Consonant: "m", Vowel: "i"},
+		{Text: "な", Consonant: "n", Vowel: "a"},
+		{Text: "さ", Consonant: "s", Vowel: "a"},
+		{Text: "ん", Consonant: "n", Vowel: "n"},
+		{Pause: true},
+		{Text: "て", Consonant: "t", Vowel: "e"},
+		{Text: "す", Consonant: "s", Vowel: "u"},
+		{Text: "と", Consonant: "t", Vowel: "o"},
+		{Pause: true},
+		{Text: "お", Vowel: "o"},
+		{Text: "は", Consonant: "h", Vowel: "a"},
+		{Text: "よ", Consonant: "y", Vowel: "o"},
+		{Text: "ー", Vowel: "o"},
+		{Pause: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("morae = %#v, want %#v", got, want)
+	}
+}
+
+func testParseKanaConsonants(t *testing.T) {
+	got, err := ParseKana("かしゃつきょんっ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"k", "sh", "ts", "ky", "n", "cl"}
+	if len(got) != len(want) {
+		t.Fatalf("morae = %#v, want %d morae", got, len(want))
+	}
+	for index, consonant := range want {
+		if got[index].Consonant != consonant {
+			t.Errorf("mora %q consonant = %q, want %q", got[index].Text, got[index].Consonant, consonant)
+		}
+	}
+	if got := ConsonantOf("キャ"); got != "ky" {
+		t.Fatalf("katakana consonant = %q, want ky", got)
+	}
+}
+
+func testParseKanaIgnoresUnknownCharacter(t *testing.T) {
+	got, err := ParseKana("あ🙂Aい")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Mora{{Text: "あ", Vowel: "a"}, {Text: "い", Vowel: "i"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("morae = %#v, want %#v", got, want)
+	}
+}

@@ -1,0 +1,673 @@
+package voicebank
+
+import (
+	"fmt"
+	"math"
+	"sort"
+	"strings"
+
+	"utautts/internal/connection"
+	"utautts/internal/frontend"
+	"utautts/internal/oto"
+)
+
+type Selection struct {
+	Position            int
+	Mora                frontend.Mora
+	Alias               string
+	Kind                AliasKind
+	Composite           bool
+	Transition          *Selection
+	Endings             []Selection
+	EndingIndex         int
+	MissingPhones       []SpeechGap
+	FallbackTier        int
+	Entry               oto.Entry
+	Candidates          []string
+	CandidateCount      int
+	TargetScore         float64
+	PreferenceScore     float64
+	TransitionScore     float64
+	JoinScore           float64
+	TransitionJoinScore float64
+	PathScore           float64
+	SubbankID           string
+	Color               string
+	RequestedTone       string
+	ResolvedTone        string
+	EntryStatus         string
+	EntryValidation     []string
+	CandidateRejections []CandidateRejection
+}
+
+type CandidateRejection struct {
+	Alias  string
+	Source string
+	Reason string
+}
+
+const maxCandidatesPerPosition = 32
+
+type SpeechGap struct {
+	Position int      `json:"position"`
+	Role     string   `json:"role"`
+	Phones   []string `json:"phones"`
+	Aliases  []string `json:"aliases"`
+}
+
+type ResolveConfig struct {
+	Tone        string
+	Color       string
+	AliasPolicy AliasPolicy
+	JoinModel   *connection.JoinModel
+}
+
+type MissingAliasError struct {
+	Position            int
+	Mora                string
+	Candidates          []string
+	CandidateRejections []CandidateRejection
+}
+
+func (e *MissingAliasError) Error() string {
+	message := fmt.Sprintf("no voicebank entry for mora %q at position %d (tried: %s)", e.Mora, e.Position, strings.Join(e.Candidates, ", "))
+	if len(e.CandidateRejections) > 0 {
+		message += fmt.Sprintf("; rejected %d unusable candidate(s)", len(e.CandidateRejections))
+	}
+	return message
+}
+
+func (b *Bank) Resolve(morae []frontend.Mora) ([]Selection, error) {
+	return b.ResolveWithConfig(morae, ResolveConfig{})
+}
+
+func (b *Bank) ResolveAtTone(morae []frontend.Mora, tone string) ([]Selection, error) {
+	return b.ResolveWithConfig(morae, ResolveConfig{Tone: tone})
+}
+
+func (b *Bank) ResolveWithConfig(morae []frontend.Mora, cfg ResolveConfig) ([]Selection, error) {
+	if cfg.JoinModel != nil {
+		if err := cfg.JoinModel.Validate(); err != nil {
+			return nil, fmt.Errorf("join model: %w", err)
+		}
+	}
+	policy := cfg.AliasPolicy
+	if policy == "" {
+		policy = AliasPolicyAuto
+	}
+	if !policy.valid() {
+		return nil, fmt.Errorf("unknown alias policy %q", policy)
+	}
+	layers, err := b.candidateLayersWithPolicy(morae, cfg.Tone, cfg.Color, policy)
+	if err != nil {
+		return nil, err
+	}
+	if b.extractor == nil {
+		b.extractor = connection.NewExtractor()
+	}
+	extractor := b.extractor
+	if cfg.JoinModel != nil {
+		extractor = connection.NewExtractorWithModel(cfg.JoinModel)
+	}
+	return selectBestPaths(layers, extractor), nil
+}
+
+func (b *Bank) candidateLayers(morae []frontend.Mora, tone string) ([][]Selection, error) {
+	return b.candidateLayersWithPolicy(morae, tone, "", AliasPolicyAuto)
+}
+
+func (b *Bank) candidateLayersWithPolicy(morae []frontend.Mora, tone, color string, policy AliasPolicy) ([][]Selection, error) {
+	return b.candidateLayersDiagnostic(morae, tone, color, policy, nil)
+}
+
+func (b *Bank) candidateLayersDiagnostic(morae []frontend.Mora, tone, color string, policy AliasPolicy, missing *[]MissingAliasError) ([][]Selection, error) {
+	layers := make([][]Selection, 0, len(morae))
+	affix, subbank, hasAffix := b.AffixForToneAndColor(tone, color)
+	requestedTone := strings.ToUpper(strings.TrimSpace(tone))
+	if requestedTone == "" {
+		requestedTone = "C4"
+	}
+	resolvedTone := requestedTone
+	if subbank.Tone != "" {
+		resolvedTone = subbank.Tone
+	}
+	if strings.TrimSpace(color) != "" && len(b.Subbanks) > 0 && !hasAffix {
+		return nil, fmt.Errorf("voicebank color %q has no subbank for tone %q", color, tone)
+	}
+	previousVowel := ""
+	phraseStart := true
+	var previousLayer []Selection
+	for position, mora := range morae {
+		if mora.Pause {
+			layers = append(layers, nil)
+			previousVowel = ""
+			phraseStart = true
+			previousLayer = nil
+			continue
+		}
+
+		candidateSpecs := aliasCandidatesWithPolicy(mora.Text, previousVowel, phraseStart, policy)
+		consonant := mora.Consonant
+		if consonant == "" {
+			consonant = frontend.ConsonantOf(mora.Text)
+		}
+		transitionSpecs := vcAliasCandidates(previousVowel, consonant, policy)
+		explicitCandidates := mora.Aliases != nil && len(mora.Aliases.Main) > 0
+		if explicitCandidates {
+			candidateSpecs = explicitMainAliasCandidates(mora.Aliases.Main, mora.Aliases.MainKinds, mora.Text)
+			transitionSpecs = explicitAliasCandidates(mora.Aliases.Transition, AliasVC)
+		}
+		var endingSpecs [][]aliasCandidate
+		if mora.Aliases != nil {
+			for _, aliases := range mora.Aliases.Endings {
+				endingSpecs = append(endingSpecs, explicitAliasCandidates(aliases, AliasOther))
+			}
+		}
+		if hasAffix {
+			strictSubbank := subbank.ID != "" && subbank.ID != "prefix.map"
+			if strictSubbank {
+				affixedCandidates := affixCandidatesWithFallback(candidateSpecs, affix, false)
+				affixedTransitions := affixCandidatesWithFallback(transitionSpecs, affix, false)
+				if hasUsableCandidateEntries(b, affixedCandidates) {
+					candidateSpecs = affixedCandidates
+				} else {
+					// 専用oto配下に接辞なしaliasを置くOpenUtau音源へフォールバックする。
+					candidateSpecs = affixCandidatesWithFallback(candidateSpecs, affix, true)
+				}
+				if hasUsableCandidateEntries(b, affixedTransitions) {
+					transitionSpecs = affixedTransitions
+				} else {
+					transitionSpecs = affixCandidatesWithFallback(transitionSpecs, affix, true)
+				}
+			} else {
+				candidateSpecs = affixCandidatesWithFallback(candidateSpecs, affix, true)
+				transitionSpecs = affixCandidatesWithFallback(transitionSpecs, affix, true)
+			}
+			for index := range endingSpecs {
+				endingSpecs[index] = affixCandidatesWithFallback(endingSpecs[index], affix, true)
+			}
+		}
+		if !explicitCandidates {
+			candidateSpecs = preferOriginalKanaCandidates(b, candidateSpecs)
+		}
+		allSpecs := append(append([]aliasCandidate{}, candidateSpecs...), transitionSpecs...)
+		for _, specs := range endingSpecs {
+			allSpecs = append(allSpecs, specs...)
+		}
+		candidates := candidateNames(allSpecs)
+		var candidatesAtPosition []Selection
+		var rejections []CandidateRejection
+		type validatedEntry struct {
+			entry      oto.Entry
+			validation EntryValidation
+		}
+		validatedEntries := func(alias string, entries []oto.Entry) []validatedEntry {
+			valid := make([]validatedEntry, 0, len(entries))
+			for _, entry := range entries {
+				validation := b.validateEntry(entry)
+				if validation.Status == "unusable" {
+					rejections = append(rejections, CandidateRejection{Alias: alias, Source: entry.Filename, Reason: validation.Reason})
+					continue
+				}
+				valid = append(valid, validatedEntry{entry: entry, validation: validation})
+			}
+			return valid
+		}
+		attachEndings := func(main Selection) Selection {
+			for endingIndex, specs := range endingSpecs {
+				bestScore := math.Inf(-1)
+				var best *Selection
+				for _, endingSpec := range specs {
+					for _, validatedEnding := range validatedEntries(endingSpec.name, b.Entries[endingSpec.name]) {
+						score := validatedCandidateScore(endingSpec.tier, validatedEnding.entry, validatedEnding.validation)
+						if score <= bestScore {
+							continue
+						}
+						ending := Selection{
+							EndingIndex: endingIndex,
+							Position:    position, Mora: mora, Alias: endingSpec.name, Kind: AliasOther,
+							FallbackTier: endingSpec.tier, Entry: validatedEnding.entry, Candidates: candidates,
+							TargetScore: score, SubbankID: subbank.ID, Color: subbank.Color,
+							RequestedTone: requestedTone, ResolvedTone: resolvedTone,
+							EntryStatus: validatedEnding.validation.Status, EntryValidation: validatedEnding.validation.Checks,
+						}
+						best, bestScore = &ending, score
+					}
+				}
+				if best == nil {
+					if mora.Aliases != nil && endingIndex < len(mora.Aliases.EndingPhones) && len(mora.Aliases.EndingPhones[endingIndex]) > 0 {
+						gap := SpeechGap{Position: position, Role: "coda", Phones: append([]string(nil), mora.Aliases.EndingPhones[endingIndex]...)}
+						for _, spec := range specs {
+							gap.Aliases = append(gap.Aliases, spec.name)
+						}
+						main.MissingPhones = append(main.MissingPhones, gap)
+					}
+					// 録音のない末子音で、後続の録音可能な子音を隠さない。
+					continue
+				}
+				main.Endings = append(main.Endings, *best)
+			}
+			return main
+		}
+		for _, candidate := range candidateSpecs {
+			entries := validatedEntries(candidate.name, b.Entries[candidate.name])
+			for _, validated := range entries {
+				entry, validation := validated.entry, validated.validation
+				main := attachEndings(Selection{
+					Position: position, Mora: mora, Alias: candidate.name, Kind: candidate.kind,
+					FallbackTier: candidate.tier, Entry: entry, Candidates: candidates,
+					TargetScore: validatedCandidateScore(candidate.tier, entry, validation),
+					SubbankID:   subbank.ID, Color: subbank.Color, RequestedTone: requestedTone,
+					ResolvedTone: resolvedTone, EntryStatus: validation.Status, EntryValidation: validation.Checks,
+				})
+				if !explicitCandidates {
+					candidatesAtPosition = append(candidatesAtPosition, main)
+				}
+				if candidate.kind != AliasCV || isWildcardAlias(candidate.name) || len(transitionSpecs) == 0 {
+					if explicitCandidates {
+						candidatesAtPosition = append(candidatesAtPosition, main)
+					}
+					continue
+				}
+				compositeAdded := false
+				for _, transitionSpec := range transitionSpecs {
+					for _, validatedTransition := range validatedEntries(transitionSpec.name, b.Entries[transitionSpec.name]) {
+						transitionEntry, transitionValidation := validatedTransition.entry, validatedTransition.validation
+						transition := Selection{
+							Position: position, Mora: mora, Alias: transitionSpec.name, Kind: AliasVC,
+							FallbackTier: transitionSpec.tier, Entry: transitionEntry, Candidates: candidates,
+							TargetScore: validatedCandidateScore(transitionSpec.tier, transitionEntry, transitionValidation),
+							SubbankID:   subbank.ID, Color: subbank.Color, RequestedTone: requestedTone,
+							ResolvedTone: resolvedTone, EntryStatus: transitionValidation.Status,
+							EntryValidation: transitionValidation.Checks,
+						}
+						composite := main
+						composite.Composite = true
+						composite.Transition = &transition
+						composite.TransitionScore = transition.TargetScore
+						candidatesAtPosition = append(candidatesAtPosition, composite)
+						compositeAdded = true
+					}
+				}
+				if explicitCandidates && !compositeAdded {
+					candidatesAtPosition = append(candidatesAtPosition, main)
+				}
+			}
+		}
+		for index := range candidatesAtPosition {
+			selected := &candidatesAtPosition[index]
+			if mora.Aliases != nil && selected.Transition == nil {
+				for alias, phones := range mora.Aliases.MainMissing {
+					if selected.Alias == alias || (hasAffix && selected.Alias == affix.Prefix+alias+affix.Suffix) {
+						selected.MissingPhones = append(append([]SpeechGap(nil), selected.MissingPhones...), SpeechGap{Position: position, Role: "onset", Phones: append([]string(nil), phones...), Aliases: append([]string(nil), mora.Aliases.Transition...)})
+						break
+					}
+				}
+			}
+			candidatesAtPosition[index].CandidateRejections = append([]CandidateRejection(nil), rejections...)
+			if candidatesAtPosition[index].Transition != nil {
+				candidatesAtPosition[index].Transition.CandidateRejections = append([]CandidateRejection(nil), rejections...)
+			}
+			for endingIndex := range candidatesAtPosition[index].Endings {
+				candidatesAtPosition[index].Endings[endingIndex].CandidateRejections = append([]CandidateRejection(nil), rejections...)
+			}
+		}
+		if len(candidatesAtPosition) == 0 {
+			if mora.Vowel == "cl" {
+				candidatesAtPosition = []Selection{{
+					Position: position, Mora: mora, Alias: "<closure>",
+					Kind: AliasOther, FallbackTier: 0,
+					Candidates: candidates, CandidateCount: 1,
+					TargetScore: 100,
+				}}
+				layers = append(layers, candidatesAtPosition)
+				previousLayer = candidatesAtPosition
+				previousVowel = mora.Vowel
+				phraseStart = false
+				continue
+			}
+			failure := MissingAliasError{Position: position, Mora: mora.Text, Candidates: candidates, CandidateRejections: rejections}
+			if missing == nil {
+				return nil, &failure
+			}
+			*missing = append(*missing, failure)
+			layers = append(layers, nil)
+			previousLayer = nil
+			previousVowel = mora.Vowel
+			phraseStart = false
+			continue
+		}
+		applyCompositePreferences(candidatesAtPosition, policy)
+		applyEnglishCandidatePreferences(candidatesAtPosition, previousLayer)
+		if len(candidatesAtPosition) > maxCandidatesPerPosition {
+			sort.SliceStable(candidatesAtPosition, func(i, j int) bool {
+				left := localCandidateScore(candidatesAtPosition[i])
+				right := localCandidateScore(candidatesAtPosition[j])
+				return left > right
+			})
+			candidatesAtPosition = candidatesAtPosition[:maxCandidatesPerPosition]
+		}
+		for index := range candidatesAtPosition {
+			candidatesAtPosition[index].CandidateCount = len(candidatesAtPosition)
+			if candidatesAtPosition[index].Transition != nil {
+				candidatesAtPosition[index].Transition.CandidateCount = len(candidatesAtPosition)
+			}
+			for endingIndex := range candidatesAtPosition[index].Endings {
+				candidatesAtPosition[index].Endings[endingIndex].CandidateCount = len(candidatesAtPosition)
+			}
+		}
+		layers = append(layers, candidatesAtPosition)
+		previousLayer = candidatesAtPosition
+		previousVowel = mora.Vowel
+		phraseStart = false
+	}
+	return layers, nil
+}
+
+// candidateScoreはalias優先度とoto.iniの整合性から重複候補を選ぶ。
+func candidateScore(candidateTier int, entry oto.Entry) float64 {
+	score := 100 - float64(candidateTier)*10
+	if entry.Preutterance >= 0 {
+		score += 4
+	} else {
+		score -= 30 + math.Abs(entry.Preutterance)
+	}
+	if entry.Fixed >= entry.Preutterance && entry.Fixed >= 0 {
+		score += 4
+	} else {
+		score -= 20 + math.Abs(entry.Preutterance-entry.Fixed)
+	}
+	if entry.Overlap <= entry.Preutterance {
+		score += 4
+	} else {
+		score -= 20 + math.Abs(entry.Overlap-entry.Preutterance)
+	}
+	if entry.Offset >= 0 {
+		score += 2
+	} else {
+		score -= 20
+	}
+	return score
+}
+
+// validatedCandidateScoreは同じ候補内で明確な録音劣化を弱く避ける。
+func validatedCandidateScore(candidateTier int, entry oto.Entry, validation EntryValidation) float64 {
+	score := candidateScore(candidateTier, entry)
+	if validation.Status == "degraded" {
+		score -= 3
+	}
+	return score
+}
+
+func localCandidateScore(candidate Selection) float64 {
+	return candidate.TargetScore + candidate.PreferenceScore
+}
+
+func hasUsableCandidateEntries(bank *Bank, candidates []aliasCandidate) bool {
+	for _, candidate := range candidates {
+		for _, entry := range bank.Entries[candidate.name] {
+			if bank.validateEntry(entry).Status != "unusable" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+type aliasCandidate struct {
+	name       string
+	tier       int
+	kind       AliasKind
+	equivalent bool
+}
+
+func explicitAliasCandidates(names []string, kind AliasKind) []aliasCandidate {
+	result := make([]aliasCandidate, 0, len(names))
+	for tier, name := range names {
+		if name = strings.TrimSpace(name); name != "" {
+			result = append(result, aliasCandidate{name: name, tier: tier, kind: kind})
+		}
+	}
+	return uniqueCandidates(result)
+}
+
+func explicitMainAliasCandidates(names, kinds []string, fallback string) []aliasCandidate {
+	result := explicitAliasCandidates(names, AliasOther)
+	for index := range result {
+		if index < len(kinds) {
+			switch strings.ToLower(strings.TrimSpace(kinds[index])) {
+			case "cv":
+				result[index].kind = AliasCV
+			case "vcv":
+				result[index].kind = AliasVCV
+			case "vc":
+				result[index].kind = AliasVC
+			}
+		}
+		if result[index].name == fallback {
+			result[index].kind = AliasCV
+		}
+	}
+	return result
+}
+
+func preferOriginalKanaCandidates(bank *Bank, candidates []aliasCandidate) []aliasCandidate {
+	originals := make([]aliasCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if !candidate.equivalent {
+			originals = append(originals, candidate)
+		}
+	}
+	if !hasUsableCandidateEntries(bank, originals) {
+		return candidates
+	}
+
+	result := make([]aliasCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if !candidate.equivalent {
+			result = append(result, candidate)
+		}
+	}
+	return result
+}
+
+func affixCandidates(base []aliasCandidate, affix Affix) []aliasCandidate {
+	return affixCandidatesWithFallback(base, affix, true)
+}
+
+func affixCandidatesWithFallback(base []aliasCandidate, affix Affix, allowUnprefixed bool) []aliasCandidate {
+	result := make([]aliasCandidate, 0, len(base)*2)
+	for _, candidate := range base {
+		result = append(result, aliasCandidate{name: affix.Prefix + candidate.name + affix.Suffix, tier: candidate.tier, kind: candidate.kind, equivalent: candidate.equivalent})
+		if allowUnprefixed {
+			result = append(result, aliasCandidate{name: candidate.name, tier: candidate.tier + 1, kind: candidate.kind, equivalent: candidate.equivalent})
+		}
+	}
+	return uniqueCandidates(result)
+}
+
+func aliasCandidates(mora, previousVowel string, phraseStart bool) []aliasCandidate {
+	return aliasCandidatesWithPolicy(mora, previousVowel, phraseStart, AliasPolicyAuto)
+}
+
+// equivalentKanaFormsは、専用録音がない場合に使える同音の仮名を返す。
+//
+//	を = お、ぢ = じ、づ = ず、ゐ = い、ゑ = え
+//
+// 小書き仮名の組み合わせは別の音なので含めない。
+func equivalentKanaForms(mora string) []string {
+	switch mora {
+	case "を":
+		return []string{"お"}
+	case "ぢ":
+		return []string{"じ"}
+	case "づ":
+		return []string{"ず"}
+	case "ゐ":
+		return []string{"い"}
+	case "ゑ":
+		return []string{"え"}
+	}
+	return nil
+}
+
+// aliasFormはモーラに対して試す表記。fallbackは同音候補への追加ペナルティ。
+type aliasForm struct {
+	text       string
+	fallback   int
+	equivalent bool
+}
+
+func aliasCandidatesWithPolicy(mora, previousVowel string, phraseStart bool, policy AliasPolicy) []aliasCandidate {
+	forms := make([]aliasForm, 0, 4)
+	if mora == "ー" {
+		if vowelKana := map[string]string{"a": "あ", "i": "い", "u": "う", "e": "え", "o": "お"}[previousVowel]; vowelKana != "" {
+			forms = append(forms, aliasForm{text: vowelKana}, aliasForm{text: toKatakana(vowelKana)})
+		}
+	}
+	// 専用録音がない場合も同音候補で合成し、元の仮名を常に優先する。
+	base := []aliasForm{{text: mora}}
+	for _, equivalent := range equivalentKanaForms(mora) {
+		base = append(base, aliasForm{text: equivalent, fallback: 1, equivalent: true})
+	}
+	for _, form := range base {
+		forms = append(forms, form)
+		if katakana := toKatakana(form.text); katakana != form.text {
+			forms = append(forms, aliasForm{text: katakana, fallback: form.fallback, equivalent: form.equivalent})
+		}
+	}
+
+	var candidates []aliasCandidate
+	allowVCVTarget := mora != "っ"
+	if policy != AliasPolicyCVOnly && allowVCVTarget && phraseStart {
+		for _, form := range forms {
+			candidates = append(candidates, aliasCandidate{name: "- " + form.text, tier: form.fallback, kind: AliasVCV, equivalent: form.equivalent})
+		}
+	} else if policy != AliasPolicyCVOnly && allowVCVTarget && previousVowel != "" && previousVowel != "cl" {
+		for _, form := range forms {
+			candidates = append(candidates, aliasCandidate{name: previousVowel + " " + form.text, tier: form.fallback, kind: AliasVCV, equivalent: form.equivalent})
+		}
+	}
+	for _, form := range forms {
+		candidates = append(candidates, aliasCandidate{name: form.text, tier: policyTier(policy, 1, AliasCV) + form.fallback, kind: AliasCV, equivalent: form.equivalent})
+	}
+	if policy != AliasPolicyCVOnly && !phraseStart {
+		for _, form := range forms {
+			candidates = append(candidates, aliasCandidate{name: "* " + form.text, tier: policyTier(policy, 2, AliasCV) + form.fallback, kind: AliasCV, equivalent: form.equivalent})
+		}
+	}
+	return uniqueCandidates(candidates)
+}
+
+func vcAliasCandidates(previousVowel, consonant string, policy AliasPolicy) []aliasCandidate {
+	if policy == AliasPolicyCVOnly || previousVowel == "" || previousVowel == "cl" || consonant == "" || consonant == "cl" {
+		return nil
+	}
+	contexts := vowelContextForms(previousVowel)
+	result := make([]aliasCandidate, 0, len(contexts))
+	for _, context := range contexts {
+		result = append(result, aliasCandidate{name: context + " " + consonant, tier: vcPolicyTier(policy), kind: AliasVC})
+	}
+	return uniqueCandidates(result)
+}
+
+func vowelContextForms(vowel string) []string {
+	forms := []string{vowel}
+	if kana := map[string]string{"a": "あ", "i": "い", "u": "う", "e": "え", "o": "お", "n": "ん"}[vowel]; kana != "" {
+		forms = append(forms, kana)
+	}
+	return forms
+}
+
+func vcPolicyTier(policy AliasPolicy) int {
+	if policy == AliasPolicyVCVPrefer {
+		return 2
+	}
+	return 0
+}
+
+func applyCompositePreferences(candidates []Selection, policy AliasPolicy) {
+	hasComposite := false
+	for _, candidate := range candidates {
+		if candidate.Composite {
+			hasComposite = true
+			break
+		}
+	}
+	if !hasComposite {
+		return
+	}
+	for index := range candidates {
+		candidate := &candidates[index]
+		if candidate.Composite {
+			candidate.PreferenceScore = compositePreferenceScore(policy)
+			continue
+		}
+		if candidate.Kind == AliasVCV && policy != AliasPolicyCVVCPrefer {
+			candidate.PreferenceScore = 10
+		}
+	}
+}
+
+func compositePreferenceScore(policy AliasPolicy) float64 {
+	switch policy {
+	case AliasPolicyVCVPrefer:
+		return 22
+	case AliasPolicyCVVCPrefer:
+		return 12
+	default:
+		return 12
+	}
+}
+
+func policyTier(policy AliasPolicy, tier int, kind AliasKind) int {
+	if policy == AliasPolicyVCVPrefer && kind != AliasVCV {
+		return tier + 2
+	}
+	if policy == AliasPolicyCVVCPrefer && kind == AliasVCV {
+		return tier + 2
+	}
+	return tier
+}
+
+func toKatakana(value string) string {
+	var result strings.Builder
+	for _, r := range value {
+		if r >= 'ぁ' && r <= 'ゖ' {
+			r += 0x60
+		}
+		result.WriteRune(r)
+	}
+	return result.String()
+}
+
+func uniqueCandidates(values []aliasCandidate) []aliasCandidate {
+	indices := map[string]int{}
+	result := make([]aliasCandidate, 0, len(values))
+	for _, value := range values {
+		if index, ok := indices[value.name]; ok {
+			result[index].tier = min(result[index].tier, value.tier)
+			result[index].equivalent = result[index].equivalent && value.equivalent
+			if result[index].kind == AliasOther {
+				result[index].kind = value.kind
+			}
+		} else {
+			indices[value.name] = len(result)
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func candidateNames(candidates []aliasCandidate) []string {
+	result := make([]string, len(candidates))
+	for index, candidate := range candidates {
+		result[index] = candidate.name
+	}
+	return result
+}
+
+func isWildcardAlias(alias string) bool {
+	parts := strings.Fields(alias)
+	return len(parts) >= 2 && strings.Contains(parts[0], "*")
+}

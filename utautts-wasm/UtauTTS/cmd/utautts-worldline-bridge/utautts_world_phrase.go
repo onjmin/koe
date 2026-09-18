@@ -1,0 +1,460 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"math"
+	"os"
+	"runtime"
+	"sync"
+	"time"
+
+	"utautts/internal/provider"
+)
+
+type cachedWorldUnit struct {
+	features      worldFeatures
+	duration      float64
+	sourceShiftMS float64
+}
+
+type preparedWorldUnit struct {
+	cached cachedWorldUnit
+}
+
+type worldAnalysisJob struct {
+	key     string
+	item    unit
+	indexes []int
+}
+
+type worldAnalysisResult struct {
+	entry cachedWorldUnit
+	err   error
+}
+
+func renderUtauTTSWorldPhrase(engine worldEngine, input manifest, cache *worldFeatureCache) ([]float32, error) {
+	started := time.Now()
+	frames := len(input.F0Curve)
+	if frames < 2 {
+		return nil, fmt.Errorf("WORLD phrase has no frames")
+	}
+	prepared, err := prepareWorldUnits(engine, input, cache, worldCPUWorkers(len(input.Units)))
+	analysisDone := time.Now()
+	if err != nil {
+		return nil, err
+	}
+	fftSize := 0
+	for _, item := range prepared {
+		if fftSize == 0 {
+			fftSize = item.cached.features.FFTSize
+		}
+		if item.cached.features.FFTSize != fftSize {
+			return nil, fmt.Errorf("WORLD units have inconsistent FFT sizes")
+		}
+	}
+	result := mixWorldFeatures(input, prepared, fftSize, worldCPUWorkers(frames))
+	if input.Engine == "utautts-world-phrase" {
+		repairWorldFeatureGaps(input, prepared, &result)
+	}
+	mixDone := time.Now()
+	report := make(map[int]provider.WorldSpeechResult)
+	if input.Engine == "utautts-world-phrase" {
+		report = applyWorldSpeechJoins(input, &result)
+		if err := applyWorldTransitionModel(input, &result, report); err != nil {
+			return nil, err
+		}
+		for index, item := range input.Units {
+			if item.Speech == nil {
+				continue
+			}
+			anchors, ok := worldSpeechAnchors(item, prepared[index].cached.duration)
+			entry := report[item.Speech.UnitIndex]
+			entry.UnitIndex = item.Speech.UnitIndex
+			entry.RetimeApplied, entry.TargetFixedMS = ok, anchors.targetFixed
+			report[item.Speech.UnitIndex] = entry
+		}
+	}
+	wave, err := engine.Synthesize(result, input.SampleRate)
+	if err != nil {
+		return nil, err
+	}
+	stopBursts := mixProtectedStopBursts(input, prepared, wave, input.SampleRate)
+	if input.SpeechResults != nil {
+		for _, item := range input.Units {
+			if item.Speech == nil {
+				continue
+			}
+			entry := report[item.Speech.UnitIndex]
+			if gain := stopBursts[item.Speech.UnitIndex]; gain > 0 {
+				entry.StopBurstApplied = true
+				entry.StopBurstGain = gain
+			}
+			*input.SpeechResults = append(*input.SpeechResults, entry)
+		}
+	}
+	if path := os.Getenv("UTAUTTS_WORLD_PROFILE"); path != "" {
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return nil, fmt.Errorf("open WORLD profile: %w", err)
+		}
+		profile := map[string]any{"engine": input.Engine, "frames": frames, "units": len(input.Units), "analysis_ms": float64(analysisDone.Sub(started).Microseconds()) / 1000, "mix_ms": float64(mixDone.Sub(analysisDone).Microseconds()) / 1000, "synthesis_ms": float64(time.Since(mixDone).Microseconds()) / 1000}
+		encodeErr := json.NewEncoder(file).Encode(profile)
+		closeErr := file.Close()
+		if encodeErr != nil {
+			return nil, encodeErr
+		}
+		if closeErr != nil {
+			return nil, closeErr
+		}
+	}
+	output := make([]float32, len(wave))
+	for index, sample := range wave {
+		output[index] = float32(sample)
+	}
+	return output, nil
+}
+
+func prepareWorldUnits(engine worldEngine, input manifest, cache *worldFeatureCache, workers int) ([]preparedWorldUnit, error) {
+	prepared := make([]preparedWorldUnit, len(input.Units))
+	jobs := make([]worldAnalysisJob, 0, len(input.Units))
+	jobByKey := make(map[string]int, len(input.Units))
+	for index, item := range input.Units {
+		key := item.CacheKey
+		if key == "" {
+			key = fmt.Sprintf("%s|%.4f|%.4f", item.Source, item.OffsetMS, item.CutoffMS)
+		}
+		entry, found := cache.get(key)
+		if found {
+			prepared[index] = preparedWorldUnit{cached: entry}
+			continue
+		}
+		if jobIndex, exists := jobByKey[key]; exists {
+			jobs[jobIndex].indexes = append(jobs[jobIndex].indexes, index)
+			continue
+		}
+		jobByKey[key] = len(jobs)
+		jobs = append(jobs, worldAnalysisJob{key: key, item: item, indexes: []int{index}})
+	}
+	results := make([]worldAnalysisResult, len(jobs))
+	parallelWorldWork(len(jobs), workers, func(jobIndex int) {
+		job := jobs[jobIndex]
+		sampleRate, samples, err := readPCM16(job.item.Source)
+		if err != nil {
+			err = fmt.Errorf("read WORLD unit %q: %w", job.item.Source, err)
+		} else if sampleRate != input.SampleRate {
+			err = fmt.Errorf("WORLD unit sample rate is %d, expected %d", sampleRate, input.SampleRate)
+		}
+		var features worldFeatures
+		var duration float64
+		sourceShiftMS := 0.0
+		if err == nil {
+			features, duration, err = analyzeWorldUnit(engine, job.item, samples, sampleRate)
+			if err != nil {
+				err = fmt.Errorf("analyze WORLD unit %q: %w", job.item.Source, err)
+			} else {
+				offsetMS := math.Max(0, job.item.OffsetMS)
+				sourceShiftMS = offsetMS - math.Floor(offsetMS/worldFramePeriodMS)*worldFramePeriodMS
+			}
+		}
+		results[jobIndex] = worldAnalysisResult{
+			entry: cachedWorldUnit{features: features, duration: duration, sourceShiftMS: sourceShiftMS}, err: err,
+		}
+	})
+	for jobIndex, result := range results {
+		if result.err != nil {
+			return nil, result.err
+		}
+		job := jobs[jobIndex]
+		cache.put(job.key, result.entry)
+		for _, index := range job.indexes {
+			prepared[index] = preparedWorldUnit{cached: result.entry}
+		}
+	}
+	return prepared, nil
+}
+
+func mixWorldFeatures(input manifest, prepared []preparedWorldUnit, fftSize, workers int) worldFeatures {
+	frames := len(input.F0Curve)
+	bins := fftSize/2 + 1
+	result := worldFeatures{
+		Frames: frames, FFTSize: fftSize, F0: append([]float64(nil), input.F0Curve...),
+		Spectrum: make([]float64, frames*bins), Aperiodicity: make([]float64, frames*bins),
+	}
+	dirty := make([]bool, frames)
+	frameWorkers := workers
+	if frames*bins < 32768 {
+		frameWorkers = 1
+	}
+	parallelWorldWork(frames, frameWorkers, func(frame int) {
+		voicedWeight, totalWeight, envelopeWeight := 0.0, 0.0, 0.0
+		normalizeOverlap := false
+		frameOffset := frame * bins
+		for bin := 0; bin < bins; bin++ {
+			result.Spectrum[frameOffset+bin] = 1e-12
+			result.Aperiodicity[frameOffset+bin] = 0
+		}
+		for unitIndex, item := range input.Units {
+			entry := prepared[unitIndex].cached
+			timeMS := float64(frame) * worldFramePeriodMS
+			localMS := timeMS - item.PositionMS
+			if localMS < 0 || localMS > item.LengthMS {
+				continue
+			}
+			weight := worldEnvelopeWeight(item, localMS)
+			if weight <= 1e-6 {
+				continue
+			}
+			if !item.LegacyMix {
+				normalizeOverlap = true
+			}
+			volumeGain := worldUnitAmplitudeGain(item)
+			sourceMS := mapWorldFeatureTime(item, entry, localMS)
+			sourceFrame := sourceMS / worldFramePeriodMS
+			left := min(max(0, int(math.Floor(sourceFrame))), entry.features.Frames-1)
+			right := min(left+1, entry.features.Frames-1)
+			fraction := sourceFrame - float64(left)
+			voicedFrame := lerp(entry.features.F0[left], entry.features.F0[right], fraction) > 71
+			effectiveWeight := weight * volumeGain * volumeGain
+			envelopeWeight += weight
+			totalWeight += effectiveWeight
+			if voicedFrame {
+				voicedWeight += effectiveWeight
+			}
+			for bin := 0; bin < bins; bin++ {
+				leftIndex, rightIndex := left*bins+bin, right*bins+bin
+				spectrum := lerp(entry.features.Spectrum[leftIndex], entry.features.Spectrum[rightIndex], fraction) * volumeGain * volumeGain
+				ap := lerp(entry.features.Aperiodicity[leftIndex], entry.features.Aperiodicity[rightIndex], fraction)
+				if !voicedFrame {
+					ap = 1
+				}
+				result.Spectrum[frameOffset+bin] += weight * spectrum
+				result.Aperiodicity[frameOffset+bin] += weight * spectrum * ap * ap
+			}
+			dirty[frame] = true
+		}
+		if normalizeOverlap && envelopeWeight > 1 {
+			// 波形版と同じく重なりを正規化し、スペクトルと非周期成分を同じ比率で縮小する。
+			normalization := 1 / envelopeWeight
+			for bin := 0; bin < bins; bin++ {
+				result.Spectrum[frameOffset+bin] *= normalization
+				result.Aperiodicity[frameOffset+bin] *= normalization
+			}
+		}
+		for bin := 0; bin < bins; bin++ {
+			i := frameOffset + bin
+			if !dirty[frame] || totalWeight <= 1e-12 {
+				result.Aperiodicity[i] = 1
+			} else {
+				result.Aperiodicity[i] = math.Sqrt(math.Max(0, math.Min(1, result.Aperiodicity[i]/result.Spectrum[i])))
+			}
+		}
+		if totalWeight <= 1e-12 || voicedWeight*2 <= totalWeight {
+			result.F0[frame] = 0
+		}
+	})
+	for frame := 0; frame < frames; frame++ {
+		if !dirty[frame] {
+			result.F0[frame] = 0
+			continue
+		}
+	}
+	return result
+}
+
+// WORLDのパワースペクトルへ波形版と同じ音量係数を適用する。
+func worldUnitAmplitudeGain(item unit) float64 {
+	volume := item.Volume
+	if volume <= 0 || math.IsNaN(volume) || math.IsInf(volume, 0) {
+		volume = 100
+	}
+	if item.LegacyMix {
+		return math.Max(0, volume/100)
+	}
+	energy := item.EnergyFactor
+	if energy <= 0 || math.IsNaN(energy) || math.IsInf(energy, 0) {
+		energy = 1
+	}
+	return math.Min(1.5, math.Max(0, volume/100*energy))
+}
+
+// oto.offsetのフレーム端数を補正する。発話タイミング補正済みなら時刻基準を使う。
+func mapWorldFeatureTime(item unit, entry cachedWorldUnit, localMS float64) float64 {
+	sourceMS := mapWorldSourceTime(item, entry.duration, localMS)
+	if item.LegacyMix || entry.sourceShiftMS == 0 {
+		return sourceMS
+	}
+	if _, ok := worldSpeechAnchors(item, entry.duration); !ok {
+		sourceMS += entry.sourceShiftMS
+	}
+	return sourceMS
+}
+
+func worldCPUWorkers(tasks int) int {
+	return min(max(1, tasks), max(1, runtime.GOMAXPROCS(0)))
+}
+
+func parallelWorldWork(tasks, workers int, work func(int)) {
+	workers = min(max(1, workers), max(1, tasks))
+	if workers == 1 {
+		for index := 0; index < tasks; index++ {
+			work(index)
+		}
+		return
+	}
+	jobs := make(chan int)
+	var group sync.WaitGroup
+	group.Add(workers)
+	for range workers {
+		go func() {
+			defer group.Done()
+			for index := range jobs {
+				work(index)
+			}
+		}()
+	}
+	for index := 0; index < tasks; index++ {
+		jobs <- index
+	}
+	close(jobs)
+	group.Wait()
+}
+
+func analyzeWorldUnit(engine worldEngine, item unit, samples []float64, sampleRate int) (worldFeatures, float64, error) {
+	hopSize := int(math.Round(worldFramePeriodMS * float64(sampleRate) / 1000))
+	fullFrames := len(samples)/hopSize + 1
+	startFrame := max(0, int(item.OffsetMS/worldFramePeriodMS))
+	endMS := float64(len(samples))*1000/float64(sampleRate) - item.CutoffMS
+	if item.CutoffMS < 0 {
+		endMS = item.OffsetMS - item.CutoffMS
+	}
+	endFrame := min(fullFrames, int(math.Ceil(endMS/worldFramePeriodMS)))
+	if endFrame <= startFrame || endFrame-startFrame < 2 {
+		return worldFeatures{}, 0, fmt.Errorf("usable source region is too short")
+	}
+	trimStart := max(0, startFrame-2)
+	trimEnd := min(fullFrames, endFrame+2)
+	trimmed := make([]float64, (trimEnd-trimStart)*hopSize)
+	sampleStart := trimStart * hopSize
+	if sampleStart < len(samples) {
+		copy(trimmed, samples[sampleStart:min(len(samples), trimEnd*hopSize)])
+	}
+
+	var inputF0 []float64
+	if item.FrqPath != "" {
+		if frq, err := readWorldFRQ(item.FrqPath); err == nil {
+			fullF0 := sampleWorldFRQ(frq, fullFrames, hopSize, 71)
+			inputF0 = append([]float64(nil), fullF0[trimStart:trimEnd]...)
+		}
+	}
+	features, err := engine.Analyze(trimmed, sampleRate, inputF0)
+	if err != nil {
+		return worldFeatures{}, 0, err
+	}
+
+	left := startFrame - trimStart
+	length := endFrame - startFrame
+	features, err = sliceWorldFeatures(features, left, length)
+	if err != nil {
+		return worldFeatures{}, 0, err
+	}
+	gain := worldAutoGain(trimmed, samples, features.F0)
+	for index := range features.Spectrum {
+		features.Spectrum[index] *= gain * gain
+	}
+	return features, float64(length) * worldFramePeriodMS, nil
+}
+
+func sliceWorldFeatures(features worldFeatures, start, length int) (worldFeatures, error) {
+	if start < 0 || length < 2 || start+length > features.Frames {
+		return worldFeatures{}, fmt.Errorf("WORLD feature slice is outside analysis: %d+%d > %d", start, length, features.Frames)
+	}
+	bins := features.FFTSize/2 + 1
+	return worldFeatures{
+		Frames: length, FFTSize: features.FFTSize,
+		F0:           append([]float64(nil), features.F0[start:start+length]...),
+		Spectrum:     append([]float64(nil), features.Spectrum[start*bins:(start+length)*bins]...),
+		Aperiodicity: append([]float64(nil), features.Aperiodicity[start*bins:(start+length)*bins]...),
+	}, nil
+}
+
+func worldAutoGain(segment, source, f0 []float64) float64 {
+	maxAbs := func(values []float64) float64 {
+		var result float64
+		for _, value := range values {
+			result = math.Max(result, math.Abs(value))
+		}
+		return result
+	}
+	var voiced int
+	for _, value := range f0 {
+		if value > 71 {
+			voiced++
+		}
+	}
+	voicedRatio := float64(voiced) / float64(max(1, len(f0)))
+	weight := 1 / (1 + math.Exp(5-10*voicedRatio))
+	peak := maxAbs(segment)*weight + maxAbs(source)*(1-weight)
+	if peak < 1e-3 {
+		return 1
+	}
+	return math.Pow(0.5/peak, 0.86)
+}
+
+func mapWorldSourceTime(item unit, sourceDuration, localMS float64) float64 {
+	destinationMS := math.Max(0, item.SkipMS+localMS)
+	if anchors, ok := worldSpeechAnchors(item, sourceDuration); ok {
+		return anchors.sourceTime(destinationMS)
+	}
+	consonantSpeed := math.Pow(0.5, 1-item.ConsonantVelocity/100)
+	sourceConsonant := min(math.Max(0, item.ConsonantMS), sourceDuration)
+	destinationConsonant := sourceConsonant / consonantSpeed
+	if destinationMS < destinationConsonant {
+		return min(sourceDuration, destinationMS*consonantSpeed)
+	}
+	destinationVowel := math.Max(worldFramePeriodMS, item.RequiredLengthMS-destinationConsonant)
+	sourceVowel := math.Max(0, sourceDuration-sourceConsonant)
+	return min(sourceDuration, sourceConsonant+(destinationMS-destinationConsonant)*sourceVowel/destinationVowel)
+}
+
+func worldEnvelopeWeight(item unit, localMS float64) float64 {
+	if !item.LegacyMix && len(item.Envelope) >= 2 {
+		// envelopeは先頭点基準、localMSは出力位置からの相対時間。
+		x := localMS + item.Envelope[0].XMS
+		for index := 0; index+1 < len(item.Envelope); index++ {
+			left, right := item.Envelope[index], item.Envelope[index+1]
+			if math.IsNaN(left.XMS) || math.IsInf(left.XMS, 0) || math.IsNaN(right.XMS) || math.IsInf(right.XMS, 0) {
+				return 0
+			}
+			if x > right.XMS {
+				continue
+			}
+			if right.XMS <= left.XMS {
+				continue
+			}
+			fraction := (x - left.XMS) / (right.XMS - left.XMS)
+			fraction = math.Max(0, math.Min(1, fraction))
+			// 音量変化を滑らかにする。
+			fraction = fraction * fraction * (3 - 2*fraction)
+			return math.Max(0, math.Min(1, lerp(left.Y, right.Y, fraction)))
+		}
+		last := item.Envelope[len(item.Envelope)-1]
+		if x < item.Envelope[0].XMS {
+			return math.Max(0, math.Min(1, item.Envelope[0].Y))
+		}
+		return math.Max(0, math.Min(1, last.Y))
+	}
+	weight := 1.0
+	if item.FadeInMS > 0 && localMS < item.FadeInMS {
+		weight = localMS / item.FadeInMS
+	}
+	remaining := item.LengthMS - localMS
+	if item.FadeOutMS > 0 && remaining < item.FadeOutMS {
+		weight = math.Min(weight, remaining/item.FadeOutMS)
+	}
+	return weight
+}
+
+func lerp(left, right, fraction float64) float64 {
+	return left + (right-left)*math.Max(0, math.Min(1, fraction))
+}

@@ -1,0 +1,314 @@
+#include "selftest.h"
+
+#include "backend.h"
+
+#include <QDir>
+#include <QEventLoop>
+#include <QDebug>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QMetaObject>
+#include <QQuickWindow>
+#include <QSettings>
+#include <QTemporaryDir>
+#include <QTimer>
+#include <QUrl>
+#include <QVariantList>
+#include <QVariantMap>
+#include <utility>
+
+namespace {
+constexpr int asyncTimeoutMS = 60000;
+
+bool require(bool condition, const QString &message) {
+    if (!condition)
+        qCritical().noquote() << "self-test:" << message;
+    return condition;
+}
+
+template<typename Signal, typename Trigger>
+bool waitFor(Backend &backend, Signal signal, Trigger trigger, const QString &operation) {
+    QEventLoop loop;
+    QTimer timer;
+    timer.setSingleShot(true);
+    bool completed = false;
+    QObject::connect(&backend, signal, &loop, [&] {
+        completed = true;
+        loop.quit();
+    });
+    QObject::connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+    trigger();
+    timer.start(asyncTimeoutMS);
+    loop.exec();
+    return require(completed, operation + QStringLiteral(" timed out"))
+        && require(backend.error().isEmpty(), operation + QStringLiteral(": ") + backend.error());
+}
+
+QString firstID(const QVariantList &items) {
+    return items.isEmpty() ? QString() : items.first().toMap().value(QStringLiteral("id")).toString();
+}
+
+QString productionRenderer(const Backend &backend, const QVariantMap &model) {
+    const QVariantList recommended = model.value(QStringLiteral("recommended_renderers")).toList();
+    for (const QVariant &wantedValue : recommended) {
+        const QString wanted = wantedValue.toString();
+        for (const QVariant &rendererValue : backend.renderers()) {
+            const QVariantMap renderer = rendererValue.toMap();
+            if (renderer.value(QStringLiteral("id")).toString() == wanted)
+                return wanted;
+        }
+    }
+    return firstID(backend.renderers());
+}
+
+QVariantMap sampleProject(const QString &voicebankID, const QString &modelID, const QString &rendererID) {
+    const QVariantMap utterance{
+        {"text", QStringLiteral("こんにちは")}, {"voicebank_id", voicebankID},
+        {"model_id", modelID}, {"renderer_id", rendererID}, {"alias_policy", "auto"},
+        {"tone", "C4"}, {"color", ""}, {"mora_duration_ms", 120},
+        {"pause_duration_ms", 180}, {"intonation", 1.0}, {"apply_pitch", true},
+        {"pitch_points", QVariantList{}}, {"mora_durations_ms", QVariantList{}},
+        {"mora_positions_ms", QVariantList{}}
+    };
+    return {{"format", "utautts-project"}, {"format_version", 5},
+            {"utterances", QVariantList{utterance}}, {"selected_index", 0}};
+}
+}
+
+int runSelfTest(Backend &backend, QObject *rootObject) {
+    const QString selfTestDirectory = qEnvironmentVariable("UTAUTTS_SELF_TEST_DIRECTORY");
+    if (!require(backend.connected(), QStringLiteral("native backend is not connected"))
+            || !require(QFileInfo::exists(QDir(selfTestDirectory).filePath(QStringLiteral("config.ini"))),
+                        QStringLiteral("portable config file was not created"))
+            || !require(!backend.voicebanks().isEmpty(), QStringLiteral("no bundled voicebank"))
+            || !require(!backend.models().isEmpty(), QStringLiteral("no bundled prosody model"))
+            || !require(!backend.renderers().isEmpty(), QStringLiteral("no bundled renderer")))
+        return 1;
+
+    QSettings migrationSettings(QDir(selfTestDirectory).filePath(QStringLiteral("config.ini")),
+                                QSettings::IniFormat);
+    if (!require(migrationSettings.value(QStringLiteral("migration/schema")).toInt() >= 1,
+                 QStringLiteral("startup migration schema was not recorded"))
+            || !require(!migrationSettings.contains(QStringLiteral("migration/pending_to")),
+                        QStringLiteral("startup migration remained pending")))
+        return 1;
+
+    const QStringList languageCodes = backend.languageCodes();
+    const QString resolvedLanguage = backend.resolvedLanguage();
+    QJsonParseError languageError;
+    const QJsonDocument languageDocument = QJsonDocument::fromJson(
+            backend.loadLanguageFile(QStringLiteral("auto")).toUtf8(), &languageError);
+    if (!require(!languageCodes.isEmpty() && languageCodes.first() == QStringLiteral("auto"),
+                 QStringLiteral("automatic language option is unavailable"))
+            || !require(languageCodes.contains(resolvedLanguage),
+                        QStringLiteral("resolved UI language is unavailable: ") + resolvedLanguage)
+            || !require(languageError.error == QJsonParseError::NoError && languageDocument.isObject(),
+                        QStringLiteral("automatic language file could not be loaded")))
+        return 1;
+
+    QVariant interfaceResult;
+    if (!require(rootObject != nullptr
+                 && QMetaObject::invokeMethod(rootObject, "runInterfaceSelfTest",
+                                              Q_RETURN_ARG(QVariant, interfaceResult)),
+                 QStringLiteral("QML interface self-test could not be invoked"))
+            || !require(interfaceResult.toString().isEmpty(),
+                        QStringLiteral("QML interface self-test: ") + interfaceResult.toString()))
+        return 1;
+
+    QTemporaryDir temporary;
+    const QString captureDirectory = qEnvironmentVariable("UTAUTTS_UI_CAPTURE_DIR");
+    if (!captureDirectory.isEmpty()) {
+        auto *window = qobject_cast<QQuickWindow *>(rootObject);
+        auto *settings = rootObject->findChild<QQuickWindow *>(QStringLiteral("settingsWindow"));
+        if (!require(window && settings && QDir().mkpath(captureDirectory),
+                     QStringLiteral("UI capture could not be initialized")))
+            return 1;
+        window->show();
+        QEventLoop loop;
+        QTimer::singleShot(300, &loop, &QEventLoop::quit);
+        loop.exec();
+        const QString capturePath = QDir(captureDirectory).filePath(QStringLiteral("normal.png"));
+        if (!require(window->grabWindow().save(capturePath),
+                     QStringLiteral("UI capture failed")))
+            return 1;
+        window->hide();
+        settings->show();
+        for (const auto &[page, name] : {
+                 std::pair{0, QStringLiteral("settings-synthesis.png")},
+                 std::pair{2, QStringLiteral("settings-behavior.png")}}) {
+            settings->setProperty("currentPage", page);
+            QEventLoop loop;
+            QTimer::singleShot(300, &loop, &QEventLoop::quit);
+            loop.exec();
+            if (!require(settings->grabWindow().save(QDir(captureDirectory).filePath(name)),
+                         QStringLiteral("settings UI capture failed")))
+                return 1;
+        }
+        settings->hide();
+    }
+    if (!require(temporary.isValid(), QStringLiteral("temporary directory is unavailable")))
+        return 1;
+
+    const QString voicebankID = firstID(backend.voicebanks());
+    const QVariantMap model = backend.models().first().toMap();
+    const QString modelID = model.value(QStringLiteral("id")).toString();
+    const QString rendererID = productionRenderer(backend, model);
+    if (!require(!voicebankID.isEmpty() && !modelID.isEmpty() && !rendererID.isEmpty(),
+                 QStringLiteral("metadata contains an empty id")))
+        return 1;
+
+    const QUrl projectURL = QUrl::fromLocalFile(temporary.filePath(QStringLiteral("smoke.utautts")));
+    const QVariantMap project = sampleProject(voicebankID, modelID, rendererID);
+    if (!require(backend.saveProject(projectURL, project), backend.error()))
+        return 1;
+    const QVariantMap loadedProject = backend.loadProject(projectURL);
+    if (!require(!loadedProject.contains(QStringLiteral("_error"))
+                 && loadedProject.value(QStringLiteral("format")).toString() == QStringLiteral("utautts-project")
+                 && loadedProject.value(QStringLiteral("utterances")).toList().size() == 1,
+                 QStringLiteral("project round trip failed")))
+        return 1;
+    backend.clearRecentProjects();
+    for (int timingSetting : {-1, 0, 1}) {
+        QVariantMap compatibilityProject = project;
+        QVariantMap utterance = project.value("utterances").toList().first().toMap();
+        if (timingSetting >= 0)
+            utterance.insert("speech_timing", timingSetting == 1);
+        compatibilityProject.insert("utterances", QVariantList{utterance});
+        QVariant savedState;
+        if (!require(backend.saveProject(projectURL, compatibilityProject)
+                     && QMetaObject::invokeMethod(rootObject, "loadProjectFrom",
+                                                  Q_ARG(QVariant, QVariant(projectURL)))
+                     && QMetaObject::invokeMethod(rootObject, "projectData",
+                                                  Q_RETURN_ARG(QVariant, savedState)),
+                     QStringLiteral("QML project migration could not be invoked")))
+            return 1;
+        const QVariantList rows = savedState.toMap().value("utterances").toList();
+        if (!require(rows.size() == 1
+                     && rows.first().toMap().value("speech_timing").toBool() == (timingSetting == 1),
+                     QStringLiteral("saved speech timing setting was not preserved")))
+            return 1;
+    }
+    backend.rememberRecentProject(projectURL);
+    if (!require(backend.recentProjects().size() == 1
+                 && backend.recentProjects().first() == QFileInfo(projectURL.toLocalFile()).absoluteFilePath(),
+                 QStringLiteral("recent project tracking failed")))
+        return 1;
+    backend.clearRecentProjects();
+
+    const QUrl diagnosticsURL = QUrl::fromLocalFile(temporary.filePath(QStringLiteral("diagnostics.json")));
+    const QVariantMap diagnosticContext{
+        {"voicebank_id", voicebankID}, {"model_id", modelID}, {"renderer", rendererID},
+        {"alias_policy", "auto"}, {"tone", "C4"}, {"mora_duration_ms", 120},
+        {"pause_duration_ms", 180}, {"intonation_strength", 1.0}, {"apply_pitch", true},
+        {"text", QStringLiteral("診断情報に含めない文章")},
+    };
+    if (!require(backend.exportDiagnosticReport(diagnosticsURL, diagnosticContext), backend.error()))
+        return 1;
+    QFile diagnosticsFile(diagnosticsURL.toLocalFile());
+    if (!require(diagnosticsFile.open(QIODevice::ReadOnly), QStringLiteral("diagnostic report could not be read")))
+        return 1;
+    const QByteArray diagnosticsData = diagnosticsFile.readAll();
+    const QJsonDocument diagnostics = QJsonDocument::fromJson(diagnosticsData);
+    if (!require(diagnostics.isObject()
+                 && diagnostics.object().value(QStringLiteral("format")).toString()
+                    == QStringLiteral("utautts-diagnostic-report")
+                 && !diagnosticsData.contains("診断情報に含めない文章"),
+                 QStringLiteral("diagnostic report is invalid or contains input text")))
+        return 1;
+
+    if (!waitFor(backend, &Backend::analysisChanged,
+                 [&] { backend.analyze(QStringLiteral("こんにちは"), QStringLiteral("self-test")); },
+                 QStringLiteral("analysis")))
+        return 1;
+    const QJsonDocument analysis = QJsonDocument::fromJson(backend.analysisJson().toUtf8());
+    if (!require(analysis.isObject() && !analysis.object().value(QStringLiteral("reading")).toString().isEmpty(),
+                 QStringLiteral("analysis result is invalid")))
+        return 1;
+
+    const QVariantMap commonRequest{
+        {"request_id", "self-test-prosody"}, {"text", QStringLiteral("こんにちは")},
+        {"voicebank_id", voicebankID}, {"model_id", modelID}, {"renderer", rendererID},
+        {"alias_policy", "auto"}, {"tone", "C4"}, {"mora_duration_ms", 120},
+        {"pause_duration_ms", 180}, {"intonation_strength", 1.0}, {"apply_pitch", true}
+    };
+    if (!waitFor(backend, &Backend::prosodyChanged,
+                 [&] { backend.predictProsody(commonRequest); }, QStringLiteral("prosody prediction")))
+        return 1;
+    const QJsonDocument prosody = QJsonDocument::fromJson(backend.prosodyJson().toUtf8());
+    if (!require(prosody.isObject()
+                 && !prosody.object().value(QStringLiteral("mora_durations_ms")).toArray().isEmpty(),
+                 QStringLiteral("prosody result is invalid")))
+        return 1;
+
+    if (!waitFor(backend, &Backend::previewReady,
+                 [&] { backend.synthesize(commonRequest); }, QStringLiteral("synthesis")))
+        return 1;
+    const QUrl firstPreviewURL = backend.previewUrl();
+    if (!waitFor(backend, &Backend::previewReady,
+                 [&] { backend.synthesize(commonRequest); }, QStringLiteral("cached synthesis"))
+            || !require(backend.previewUrl() == firstPreviewURL,
+                        QStringLiteral("cached synthesis created a different preview")))
+        return 1;
+    diagnosticsFile.close();
+    if (!require(backend.exportDiagnosticReport(diagnosticsURL, diagnosticContext), backend.error()))
+        return 1;
+    if (!require(diagnosticsFile.open(QIODevice::ReadOnly), QStringLiteral("updated diagnostic report could not be read")))
+        return 1;
+    const QByteArray updatedDiagnosticsData = diagnosticsFile.readAll();
+    if (!require(!updatedDiagnosticsData.contains("こんにちは")
+                 && updatedDiagnosticsData.contains("<redacted>"),
+                 QStringLiteral("diagnostic report did not redact synthesis text")))
+        return 1;
+    const QUrl wavURL = QUrl::fromLocalFile(temporary.filePath(QStringLiteral("smoke.wav")));
+    const bool previousExportText = backend.exportTextWithWav();
+    const bool previousExportLab = backend.exportLabWithWav();
+    const QString previousExportEncoding = backend.exportTextEncoding();
+    backend.setExportSettings(true, true, QStringLiteral("utf-8"));
+    const bool previewSaved = backend.savePreview(wavURL);
+    const QString previewError = backend.error();
+    const bool wavValid = QFileInfo(wavURL.toLocalFile()).size() > 44;
+    const bool textSaved = QFileInfo::exists(temporary.filePath(QStringLiteral("smoke.txt")));
+    const bool labelSaved = QFileInfo::exists(temporary.filePath(QStringLiteral("smoke.lab")));
+    QFile labelFile(temporary.filePath(QStringLiteral("smoke.lab")));
+    const bool labelValid = labelFile.open(QIODevice::ReadOnly)
+            && labelFile.readAll().contains(" ");
+    backend.setExportSettings(previousExportText, previousExportLab, previousExportEncoding);
+    if (!require(previewSaved, previewError)
+            || !require(wavValid, QStringLiteral("saved WAV is empty"))
+            || !require(textSaved, QStringLiteral("text sidecar was not saved"))
+            || !require(labelSaved, QStringLiteral("label sidecar was not saved"))
+            || !require(labelValid, QStringLiteral("label sidecar is invalid")))
+        return 1;
+
+    const QUrl exoURL = backend.writeDragExo(QUrl::fromLocalFile(temporary.path()), QVariantList{wavURL}, 30);
+    if (!require(exoURL.isLocalFile() && QFileInfo::exists(exoURL.toLocalFile()),
+                 QStringLiteral("exo export failed: ") + backend.error()))
+        return 1;
+
+    backend.setDictionaryEntries(QVariantList{QVariantMap{{"surface", "UtauTTS"}, {"reading", "うたうてぃーてぃーえす"}}});
+    if (!require(backend.dictionaryEntries().size() == 1 && !backend.dictionaryFingerprint().isEmpty(),
+                 QStringLiteral("dictionary settings failed")))
+        return 1;
+    backend.setSynthesisDefaults(130, 190, 45, 2.5,
+                                 QStringLiteral("frame-intonation-v8"),
+                                 QStringLiteral("utautts-world-phrase"),
+                                 QStringLiteral("D4"), QStringLiteral("cv-only"));
+    backend.setPreviewCacheFileCount(7);
+    backend.setShortcutSequences("Ctrl+Enter", "Ctrl+S", "Ctrl+O", "Ctrl+D", "Delete", "Ctrl+Z", "Ctrl+Y");
+    if (!require(backend.defaultMoraDuration() == 130 && backend.defaultPauseDuration() == 190
+                 && backend.defaultLeadingPreutterance() == 45
+                 && backend.defaultModelId() == QStringLiteral("frame-intonation-v8")
+                 && backend.defaultRenderer() == QStringLiteral("utautts-world-phrase")
+                 && backend.previewCacheFileCount() == 7
+                 && backend.defaultIntonationStrength() == 2.5
+                 && backend.defaultTone() == QStringLiteral("D4")
+                 && backend.defaultAliasPolicy() == QStringLiteral("cv-only")
+                 && backend.undoShortcut() == QStringLiteral("Ctrl+Z"),
+                 QStringLiteral("application settings failed")))
+        return 1;
+
+    qInfo() << "UtauTTS self-test passed";
+    return 0;
+}

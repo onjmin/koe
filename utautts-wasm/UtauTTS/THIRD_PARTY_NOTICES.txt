@@ -1,0 +1,393 @@
+Kagome
+======
+
+MIT License
+
+Copyright (c) 2020 ikawaha
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+Kagome IPA dictionary / mecab-ipadic-2.7.0-20070801
+===================================================
+
+This software includes a binary and/or source version of data from
+mecab-ipadic-2.7.0-20070801.
+
+Nara Institute of Science and Technology (NAIST), the copyright holders,
+disclaims all warranties with regard to this software, including all implied
+warranties of merchantability and fitness. In no event shall NAIST be liable
+for any special, indirect or consequential damages or any damages whatsoever
+resulting from loss of use, data or profits, whether in an action of contract,
+negligence or other tortious action, arising out of or in connection with the
+use or performance of this software.
+
+A large portion of the dictionary entries originate from ICOT Free Software.
+Each user may freely distribute the program, whether in its original form or
+modified, provided that the following NO WARRANTY provisions always appear on,
+or are attached to, the program.
+
+NO WARRANTY
+
+The program was produced on an experimental basis in the course of research
+and development and is provided without any warranty whatsoever, whether
+express, implied, statutory or otherwise. This includes, but is not limited to,
+any warranty of quality, performance, merchantability, fitness for a particular
+purpose, or nonexistence of infringement of any third-party right.
+
+Each user understands that the entire risk arising from or connected with the
+program is assumed by the user. Neither ICOT, the copyright holder, nor any
+organization or person related to development of the program shall be liable
+for any damages, including general, special, incidental and consequential
+damages, arising from use of or inability to use the program, regardless of
+whether they were advised of the possibility of such damages.
+
+Use includes use, modification, copying, distribution, and production of
+secondary products. A distributor other than ICOT is likewise exempt from
+liability unless it independently grants a specific written warranty.
+
+Upstream sources:
+https://github.com/ikawaha/kagome
+https://github.com/ikawaha/kagome-dict
+
+The LICENSE text shared by Kagome v2.11.0 and kagome-dict/ipa v1.2.6 is included
+once as licenses/Go/github_com_ikawaha_kagome_v2-v2.11.0-LICENSE.txt. The
+kagome-dict/ipa NOTICE, kagome-dict v1.1.7 license, and other module-specific
+notices remain under licenses/Go in the release package.
+
+
+go-pinyin
+=========
+
+UtauTTS uses github.com/mozillazg/go-pinyin v0.21.0 to convert Chinese text
+to Pinyin. It is distributed under the MIT License, Copyright (c) 2016
+mozillazg. The exact module license and the generated pinyin-data provenance
+notice are included under licenses/Go in every release package.
+
+Upstream data project:
+https://github.com/mozillazg/pinyin-data
+
+
+pyopenjtalk frontend bridge
+==========================
+
+The Windows, Linux, and macOS releases include a standalone frontend helper built from
+pyopenjtalk 0.4.1. UtauTTS uses only its Open JTalk text-processing frontend.
+
+MIT License
+
+Copyright (c) 2018 Ryuichi Yamamoto
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Upstream source:
+https://github.com/r9y9/pyopenjtalk
+
+
+Open JTalk
+==========
+
+Copyright (c) 2008-2016 Nagoya Institute of Technology,
+Department of Computer Science. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+- Redistributions of source code must retain the above copyright notice,
+  this list of conditions and the following disclaimer.
+- Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+- Neither the name of the HTS working group nor the names of its contributors
+  may be used to endorse or promote products derived from this software
+  without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
+The bundled dictionary retains its own COPYING file at
+runtime/open_jtalk_dic_utf_8-1.11/COPYING. This is the only copy of the
+dictionary notice in the package. The helper also embeds CPython and the
+PyInstaller bootloader; their complete license texts are included under
+runtime/licenses. If Microsoft Visual C++/UCRT files are present, the
+corresponding license notice is included in the same directory.
+
+The pyopenjtalk frontend also incorporates hts_engine_API, MeCab, and the
+NAIST/UniDic dictionary terms. Their original COPYING files are included
+under licenses/OpenJTalk.
+
+Upstream source:
+https://github.com/r9y9/open_jtalk
+
+
+OpenUtau-derived code
+=====================
+
+UtauTTS includes timing and renderer compatibility code informed by OpenUtau.
+This notice covers the compatibility code and its MIT license. The upstream
+source is the OpenUtau repository listed below.
+
+The MIT License (MIT)
+
+Copyright (c) 2014 StAkira
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Upstream sources:
+https://github.com/openutau/OpenUtau/tree/0.1.565/cpp/worldline
+https://github.com/stakira/OpenUtau/blob/master/OpenUtau.Plugin.Builtin/EnglishVCCVPhonemizer.cs
+
+WORLD
+=====
+
+The UtauTTS WORLD phrase renderer builds the official WORLD
+sources at commit d625e7608ca23a870018f01e7c562ac683d9847f into an UtauTTS-owned
+analysis and synthesis library. The WORLD license and bundled component
+notices are included under licenses/WORLD in each release package.
+
+Copyright (c) 2010 M. Morise
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+- Redistributions of source code must retain the above copyright notice,
+  this list of conditions and the following disclaimer.
+- Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+- Neither the name of M. Morise nor the names of its contributors may be used
+  to endorse or promote products derived from this software without specific
+  prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
+Upstream source:
+https://github.com/mmorise/World
+
+WORLD's fft.cpp contains FFT routines by Takuya Ooura. The package permits
+use, copying, modification, and distribution for any purpose, including
+commercial use, without a fee. Its notice and official source URL are included
+as licenses/WORLD/OOURA-NOTICE.txt.
+
+WORLD's macrodefinitions.h contains MIT-licensed definitions from the
+Department of Arts and Culture of the Government of the Republic of South
+Africa, with contributions from the Meraka Institute, CSIR, and Giulio Paci.
+The complete notice is included as
+licenses/WORLD/MACRODEFINITIONS-LICENSE.txt.
+
+
+足立レイ UTAU音源 ver3.5.0
+==========================
+
+The UtauTTS GUI distribution bundles the official 足立レイ UTAU voicebank
+version 3.5.0. The voicebank was designed and created by みさいる / Mechanical
+Girl. Voicebank terms: the Mechanical Girl guidelines linked below.
+
+Bundled documents: the original readme, usage guidelines, history, and related
+documents in the voicebank directory. UTAU audio redistribution and modification
+are permitted under the current guidelines. Commercial or for-profit use:
+contact Mechanical Girl before use.
+
+Official distribution:
+https://mechanicalgirl.jp/adachi-rei/
+
+Current guidelines:
+https://mechanicalgirl.jp/guidelines/
+
+Bundled archive SHA-256:
+B96D1B21145F22E573AFD9EC8AEAAD0EC9CBAEE581C2623C64ADDEB31DE46B3D
+
+
+Windows GUI addendum
+====================
+
+The Windows GUI package additionally bundles Qt 6 and MinGW runtime files.
+Package-specific license notices: THIRD_PARTY_NOTICES-WINDOWS-GUI.txt.
+FFmpeg integration: an external Qt Multimedia backend configured by the user.
+
+
+macOS GUI addendum
+==================
+
+The macOS GUI package additionally bundles dynamically linked Qt 6 frameworks.
+Package-specific license, source-offer, relinking, and attribution notices:
+licenses/Qt and THIRD_PARTY_NOTICES-MACOS-GUI.txt. FFmpeg integration: an
+external Qt Multimedia backend configured by the user. The macOS GUI addendum
+applies to the macOS GUI package.
+
+
+Linux GUI and system Qt
+=======================
+
+The Linux GUI links dynamically to Qt 6 supplied by the host system. Qt 6 and
+the FFmpeg backend are host components with their own license, source, and
+relinking information. Reference license texts for the Windows and macOS GUI
+packages: licenses/Qt. Runtime prerequisite: a compatible Qt package from the
+distribution.
+
+
+Go runtime and standard library
+===============================
+
+The release binaries include code from the Go runtime and standard library.
+The exact Go runtime license text used by the build is included under
+licenses/Go/GO-LICENSE.txt. Go is distributed under a BSD-style license. The
+upstream text is available at:
+https://go.dev/LICENSE
+
+
+golang.org/x/text
+=================
+
+UtauTTS uses golang.org/x/text for Japanese encoding and Unicode processing.
+The release uses golang.org/x/text v0.39.0. Its PATENTS file is included as
+licenses/Go/golang_org_x_text-v0.39.0-PATENTS.txt. Its LICENSE text is
+identical to the Go runtime license and is included once as
+licenses/Go/GO-LICENSE.txt. The module is distributed under the BSD-3-Clause
+license.
+The upstream text is available at:
+https://github.com/golang/text/blob/master/LICENSE
+
+
+gopkg.in/yaml.v3
+=================
+
+UtauTTS uses gopkg.in/yaml.v3 v3.0.1 for USTX, voicebank, and DiffSinger
+project data. The module is distributed under the MIT License and Apache
+License 2.0. Its complete LICENSE and NOTICE files are included under
+licenses/Go in each release package.
+
+Upstream source:
+https://github.com/go-yaml/yaml/tree/v3.0.1
+
+
+CMU Pronouncing Dictionary
+==========================
+
+UtauTTS embeds the CMUdict pronunciation dictionary for English pronunciation
+and lexical stress. The bundled dictionary uses revision
+74790861f652b15e4ac49015a90074ad62a27690 and the source license is included as
+licenses/Go/CMUDICT-LICENSE.txt in each release package.
+
+Upstream source:
+https://github.com/cmusphinx/cmudict
+
+
+JSUT-derived prosody models and jsut-label
+==========================================
+
+This section covers the bundled JSUT-derived models
+models/frame-intonation-v8.json, models/prosody-multitask-v1.json, and
+renderer/utautts-world-phrase/models/jsut-cv-transition-tcn-v1.json, together
+with JSON target priors generated by cmd/tools/jsut-target-prior. The models
+are trained from JSUT audio. The training tools use the BASIC5000 HTS-style
+labels from https://github.com/sarulab-speech/jsut-label. Source terms and
+attribution are recorded in licenses/JSUT-DATA-AND-LABELS.txt.
+
+The [official JSUT terms](https://sites.google.com/site/shinnosuketakamichi/publication/jsut)
+define separate text and audio conditions:
+
+- Text: CC-BY-SA 4.0 and other source terms
+- Audio use: academic research, non-commercial research including research
+  within commercial organizations, and personal use
+- Audio publication: the limited website or blog publication described on the
+  official page, such as about 100 audio files
+- Commercial use: contact the JSUT rights holders listed on the official page
+
+Model and target-prior distribution policy: the academic research,
+non-commercial research, and personal-use terms in
+licenses/PROSODY-MODELS.txt. Commercial use requires prior permission from the
+JSUT rights holders.
+
+The english-intonation-v1 model contains original UtauTTS coefficients and is
+distributed under the MIT License. Its notice is
+licenses/ENGLISH-INTONATION-V1.txt. UtauTTS source code uses the repository MIT
+License; models, prompts, voicebanks, and other third-party assets use their
+respective notices.
+
+
+DiffSinger ONNX Runtime and DirectML bridge
+===========================================
+
+The Full Windows package includes the optional DiffSinger bridge. It embeds
+ONNX Runtime with the DirectML execution provider and the Microsoft DirectML
+runtime. The Microsoft.ML.OnnxRuntime.DirectML and
+Microsoft.ML.OnnxRuntime.Managed packages have identical license and
+third-party notice files. Those files are included once as
+ONNXRUNTIME-LICENSE.txt and ONNXRUNTIME-THIRD-PARTY-NOTICES.txt. The three
+Microsoft.AI.DirectML notices remain under runtime/licenses alongside the .NET
+runtime notices. Package profiles: Full Windows = bridge included; Japanese
+Windows, Linux, and macOS = bridge absent.
+
+Upstream package pages:
+https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime.DirectML/1.23.0
+https://www.nuget.org/packages/Microsoft.ML.OnnxRuntime.Managed/1.23.0
+https://www.nuget.org/packages/Microsoft.AI.DirectML/1.15.4

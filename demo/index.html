@@ -1242,6 +1242,9 @@
     const ttsProgress = $('ttsProgress');
     const ttsText = $('ttsText');
 
+    // The 80MB jpreprocess dictionary is fetched on first use, not at page load.
+    let jpreprocessInitialized = false;
+
     ttsPlayBtn.addEventListener('click', async () => {
       if (!engine || !currentManifest) {
         setLog(ttsStatus, '✗ まず .koe 音源を読み込んでください');

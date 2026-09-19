@@ -59,6 +59,8 @@ export interface UtauTTSTimelineUnit {
 	source_f0_hz: number;
 	target_f0_hz: number;
 	envelope?: { x_ms: number; y: number }[];
+	/** Set by `UtauTTSAdapter.plan` from `HtsProsody.devoiced`: the nucleus is a devoiced vowel. */
+	devoiced?: boolean;
 }
 
 /** Whole-phrase placement + F0 curve (`render.WorldlineTimeline`). */
@@ -161,6 +163,54 @@ export interface UtauTTSRenderOptions {
 	chunkUnits?: number;
 	/** Crossfade length at a mid-phrase seam in ms. Default 20. */
 	seamCrossfadeMs?: number;
+	/**
+	 * Even out the loudness of the rendered units. worldline normalises every
+	 * unit's level internally (the sample's own level does not reach the
+	 * output), but the vowel RMS that comes out still differs by several dB
+	 * from unit to unit, which a listener hears as an uneven, choppy line.
+	 * Each unit's vowel RMS (middle 35–90 % of its mora) is measured on the
+	 * rendered audio and pulled towards `unitLoudnessDb` by a gain curve
+	 * interpolated between mora centres, so there is no step at the joins. The
+	 * prosodic volume of the unit (accent loudness, devoicing) is kept.
+	 * Default true.
+	 */
+	normalizeUnitLoudness?: boolean;
+	/**
+	 * Reference vowel RMS in dBFS. Because worldline normalises every unit,
+	 * the rendered vowel level is bank-independent (≈ −15 dBFS median for a
+	 * 単独音 bank at volume 100), so an absolute reference works and keeps the
+	 * chunks of a streamed utterance consistent. Default −16.
+	 */
+	unitLoudnessDb?: number;
+	/** Largest correction applied to a unit, in dB. Default 6. */
+	unitLoudnessMaxDb?: number;
+	/**
+	 * Energy contour: loudness follows the F0 curve, in dB per semitone from
+	 * the utterance's median F0, applied as a smooth per-frame gain on the
+	 * rendered audio (the accent peak is louder, the phrase end softer, as in
+	 * natural speech, where a read sentence loses 10–15 dB over the phrase).
+	 * A plain unit concatenation renders every mora at the same level, which
+	 * is heard as a bumpy, mechanical line. 0 disables. Default 0.8.
+	 */
+	energyDbPerSemitone?: number;
+	/** Clamp for the energy contour, in dB. Default 6. */
+	energyMaxDb?: number;
+	/**
+	 * Attenuation of the vowel part of a devoiced mora (Open JTalk's 「です」
+	 * 「ます」 「あくた」…), in dB, applied from the vowel onset to the next
+	 * unit's consonant so the consonant burst of the devoiced mora itself stays
+	 * at full level (attenuating the whole unit made 「あくた」 sound like
+	 * 「あた」). 0 disables. Default −9.
+	 */
+	devoicedDb?: number;
+	/**
+	 * Soft limiter on the rendered audio: samples above this linear level are
+	 * compressed smoothly towards full scale (tanh knee). worldline's output
+	 * already peaks close to 0 dBFS with a plain plan, and the prosodic gains
+	 * push single vowels over; this keeps them from hard-clipping in the
+	 * AudioContext. 0 disables. Default 0.8.
+	 */
+	outputLimit?: number;
 	signal?: AbortSignal;
 	gender?: number;
 	tension?: number;
@@ -180,6 +230,49 @@ export function readingFromFeatures(features: FeatureFrame[]): string {
 
 const FS = WORLDLINE_SAMPLE_RATE;
 const msToSamples = (ms: number): number => Math.round((ms / 1000) * FS);
+
+/** RMS of `pcm[from, to)` in dBFS; NaN when the window is empty. */
+function rmsDb(pcm: Float32Array, from: number, to: number): number {
+	const a = Math.max(0, from);
+	const b = Math.min(pcm.length, to);
+	if (b <= a) return Number.NaN;
+	let sum = 0;
+	for (let k = a; k < b; k++) sum += pcm[k] * pcm[k];
+	return 10 * Math.log10(sum / (b - a) + 1e-12);
+}
+
+/**
+ * Multiply `pcm` by a per-frame gain curve in dB (`frameSamples` samples per
+ * frame), linearly interpolated between frame centres.
+ */
+function applyGainFrames(
+	pcm: Float32Array,
+	framesDb: Float64Array,
+	frameSamples: number,
+): void {
+	const last = framesDb.length - 1;
+	if (last < 0) return;
+	for (let k = 0; k < pcm.length; k++) {
+		const position = k / frameSamples - 0.5;
+		const left = Math.min(last, Math.max(0, Math.floor(position)));
+		const right = Math.min(last, left + 1);
+		const t = Math.min(1, Math.max(0, position - left));
+		pcm[k] *= 10 ** ((framesDb[left] * (1 - t) + framesDb[right] * t) / 20);
+	}
+}
+
+/** Soft-knee limiter: identity below `threshold`, tanh compression towards ±1 above it. */
+function softLimit(pcm: Float32Array, threshold: number): void {
+	const range = 1 - threshold;
+	if (range <= 0) return;
+	for (let k = 0; k < pcm.length; k++) {
+		const x = pcm[k];
+		const a = Math.abs(x);
+		if (a <= threshold) continue;
+		const y = threshold + range * Math.tanh((a - threshold) / range);
+		pcm[k] = x < 0 ? -y : y;
+	}
+}
 
 /** Sample the timeline F0 curve (Hz) at an absolute timeline time with linear interpolation. */
 function f0At(timeline: UtauTTSTimeline, tMs: number): number {
@@ -226,6 +319,41 @@ function applyMoraGains(plan: UtauTTSPlan, gains: number[]): void {
 		const gain = gains[index];
 		if (index < 0 || gain === undefined || !Number.isFinite(gain)) continue;
 		unit.volume *= gain;
+	}
+}
+
+/**
+ * End each vowel where HTS puts the next mora's unvoiced consonant. A 単独音
+ * unit is placed at its vowel onset with only the sample's own short
+ * consonant (its preutterance) in front, so the previous vowel would
+ * otherwise sound right up to that point: a 100 ms HTS 「h」 becomes 30 ms
+ * of 「h」 and 70 ms of extra vowel, and any pitch movement HTS put inside the
+ * consonant is heard as a glide in the vowel. Shortening the previous unit
+ * to the HTS consonant onset leaves a natural gap instead. Voiced consonants
+ * (n, m, r, g …) keep the continuous voicing.
+ */
+function applyConsonantGaps(plan: UtauTTSPlan, prosody: HtsProsody): void {
+	const { consonantMs, unvoicedOnset } = prosody;
+	if (!consonantMs || !unvoicedOnset) return;
+	if (consonantMs.length !== (plan.morae?.length ?? -1)) return;
+	const leading = plan.timeline.leading_ms;
+	const units = plan.timeline.units;
+	for (let i = 0; i + 1 < units.length; i++) {
+		const unit = units[i];
+		const next = units[i + 1];
+		if (next.position !== unit.position + 1) continue; // pause or transition in between
+		if (!unvoicedOnset[next.position]) continue;
+		const consonant = consonantMs[next.position];
+		if (!(consonant > 0)) continue;
+		const gapStart = next.note_start_ms + leading - consonant;
+		const currentEnd = unit.position_ms + unit.length_ms;
+		if (gapStart >= currentEnd) continue;
+		const minimumLength = Math.max(
+			40,
+			unit.fade_in_ms + unit.fade_out_ms + 10,
+			unit.note_start_ms + leading - unit.position_ms + 30,
+		);
+		unit.length_ms = Math.max(minimumLength, gapStart - unit.position_ms);
 	}
 }
 
@@ -291,6 +419,135 @@ function applyFade(
 			: Math.cos((Math.PI / 2) * t);
 		pcm[fromSample + k] *= gain;
 	}
+}
+
+/** Median of a non-empty array (sorted copy). */
+function median(values: number[]): number {
+	const sorted = values.slice().sort((a, b) => a - b);
+	return sorted[Math.floor(sorted.length / 2)];
+}
+
+interface LoudnessShapeOptions {
+	/** Equalise unit levels towards the reference (see `normalizeUnitLoudness`). */
+	equalize: boolean;
+	/** Reference vowel RMS in dBFS. */
+	targetDb: number;
+	maxDb: number;
+	/** Energy contour strength in dB per semitone from `referenceHz`; 0 = off. */
+	energyDbPerSemitone: number;
+	energyMaxDb: number;
+	/** Vowel-part attenuation of devoiced morae in dB (≤ 0); 0 = off. */
+	devoicedDb: number;
+	/** Utterance median F0 in Hz (centre of the energy contour). */
+	referenceHz: number;
+}
+
+/**
+ * Post-render loudness shaping of one rendered phrase: per-unit
+ * equalisation (vowel RMS measured on the rendered audio, prosodic volume
+ * kept, gain interpolated between mora centres) plus the F0-coupled energy
+ * contour, both as one smooth per-frame gain curve. `units` are the timeline
+ * units rendered into `audio` (context units included, so a unit shared by
+ * two chunks gets the same correction in both), `baseMs` the timeline time
+ * of `audio[0]`.
+ */
+function shapeLoudness(
+	audio: Float32Array,
+	units: UtauTTSTimelineUnit[],
+	timeline: UtauTTSTimeline,
+	baseMs: number,
+	options: LoudnessShapeOptions,
+): void {
+	const frameMs = timeline.frame_ms > 0 ? timeline.frame_ms : 10;
+	const frameSamples = Math.max(1, msToSamples(frameMs));
+	const frames = Math.ceil(audio.length / frameSamples) + 1;
+	const curve = new Float64Array(frames);
+
+	if (options.equalize) {
+		const anchors: { frame: number; db: number }[] = [];
+		const measured: { frame: number; intrinsicDb: number }[] = [];
+		for (const unit of units) {
+			if (!(unit.volume > 0) || unit.duration_ms < 30) continue;
+			const start = unit.note_start_ms + timeline.leading_ms - baseMs;
+			const soundEnd =
+				unit.position_ms - baseMs + unit.length_ms - unit.fade_out_ms;
+			const from = msToSamples(start + unit.duration_ms * 0.35);
+			const to = msToSamples(
+				Math.min(start + unit.duration_ms * 0.9, soundEnd),
+			);
+			if (to - from < msToSamples(20)) continue;
+			const db = rmsDb(audio, from, to);
+			if (!Number.isFinite(db) || db < -70) continue;
+			measured.push({
+				frame: (start + unit.duration_ms * 0.6) / frameMs,
+				intrinsicDb: db - 20 * Math.log10(unit.volume / 100),
+			});
+		}
+		if (measured.length > 0) {
+			const reference = options.targetDb;
+			for (const m of measured) {
+				anchors.push({
+					frame: m.frame,
+					db: Math.max(
+						-options.maxDb,
+						Math.min(options.maxDb, reference - m.intrinsicDb),
+					),
+				});
+			}
+			let a = 0;
+			for (let frame = 0; frame < frames; frame++) {
+				while (a + 1 < anchors.length && frame >= anchors[a + 1].frame) a++;
+				const left = anchors[a];
+				const right = anchors[Math.min(anchors.length - 1, a + 1)];
+				if (frame <= left.frame || right === left) curve[frame] = left.db;
+				else if (frame >= right.frame) curve[frame] = right.db;
+				else {
+					const t = (frame - left.frame) / (right.frame - left.frame);
+					curve[frame] = left.db * (1 - t) + right.db * t;
+				}
+			}
+		}
+	}
+
+	if (options.energyDbPerSemitone !== 0 && options.referenceHz > 0) {
+		for (let frame = 0; frame < frames; frame++) {
+			const f0 = f0At(timeline, baseMs + frame * frameMs);
+			if (!(f0 > 0)) continue;
+			const semitones = 12 * Math.log2(f0 / options.referenceHz);
+			curve[frame] += Math.max(
+				-options.energyMaxDb,
+				Math.min(options.energyMaxDb, semitones * options.energyDbPerSemitone),
+			);
+		}
+	}
+
+	if (options.devoicedDb < 0) {
+		const rampFrames = Math.max(1, Math.round(20 / frameMs));
+		for (let i = 0; i < units.length; i++) {
+			const unit = units[i];
+			if (!unit.devoiced) continue;
+			const start = unit.note_start_ms + timeline.leading_ms - baseMs;
+			let endMs = start + unit.duration_ms;
+			const next = units[i + 1];
+			if (next) endMs = Math.min(endMs, next.position_ms - baseMs);
+			const from = start / frameMs;
+			const to = endMs / frameMs;
+			for (
+				let frame = Math.max(0, Math.floor(from));
+				frame < frames && frame < to + rampFrames;
+				frame++
+			) {
+				const fadeIn = Math.min(1, Math.max(0, (frame - from) / rampFrames));
+				const fadeOut = Math.min(
+					1,
+					Math.max(0, (to + rampFrames - frame) / rampFrames),
+				);
+				curve[frame] += options.devoicedDb * Math.min(fadeIn, fadeOut);
+			}
+		}
+	}
+
+	applyGainFrames(audio, curve, frameSamples);
 }
 
 // ── Adapter ─────────────────────────────────────────────────────────────────
@@ -458,6 +715,13 @@ export class UtauTTSAdapter {
 		const plan = JSON.parse(response.plan) as UtauTTSPlan;
 		const gains = options.prosody?.moraGains;
 		if (gains) applyMoraGains(plan, gains);
+		const devoiced = options.prosody?.devoiced;
+		if (devoiced && devoiced.length === (plan.morae?.length ?? -1)) {
+			for (const unit of plan.timeline.units) {
+				if (devoiced[unit.position]) unit.devoiced = true;
+			}
+		}
+		if (options.prosody) applyConsonantGaps(plan, options.prosody);
 		return plan;
 	}
 
@@ -488,10 +752,19 @@ export class UtauTTSAdapter {
 			firstChunkUnits = 3,
 			chunkUnits = 6,
 			seamCrossfadeMs = 20,
+			normalizeUnitLoudness = true,
+			unitLoudnessDb = -16,
+			unitLoudnessMaxDb = 6,
+			energyDbPerSemitone = 0.8,
+			energyMaxDb = 6,
+			devoicedDb = -9,
+			outputLimit = 0.8,
 			signal,
 		} = options;
 		const timeline = plan.timeline;
 		const units = timeline.units.filter((unit) => unit.length_ms > 0);
+		const voicedF0 = timeline.f0_curve.filter((hz) => hz > 0);
+		const referenceHz = voicedF0.length > 0 ? median(voicedF0) : 0;
 		const ranges = planChunks(
 			units,
 			Math.max(1, firstChunkUnits),
@@ -541,6 +814,21 @@ export class UtauTTSAdapter {
 				voicing: options.voicing,
 			});
 			if (!audio || audio.length === 0) continue;
+			if (
+				normalizeUnitLoudness ||
+				energyDbPerSemitone !== 0 ||
+				devoicedDb < 0
+			) {
+				shapeLoudness(audio, rendered, timeline, baseMs, {
+					equalize: normalizeUnitLoudness,
+					targetDb: unitLoudnessDb,
+					maxDb: unitLoudnessMaxDb,
+					energyDbPerSemitone,
+					energyMaxDb,
+					devoicedDb,
+					referenceHz,
+				});
+			}
 
 			// Trim to [head seam − xf/2, tail seam + xf/2] and fade the seams.
 			let fromSample = 0;
@@ -563,6 +851,7 @@ export class UtauTTSAdapter {
 			}
 			if (toSample <= fromSample) continue;
 			const pcm = audio.slice(fromSample, toSample);
+			if (outputLimit > 0) softLimit(pcm, outputLimit);
 			if (range.headSeam) applyFade(pcm, 0, crossfadeSamples, true);
 			if (range.tailSeam)
 				applyFade(
@@ -598,6 +887,9 @@ export class UtauTTSAdapter {
 			const n = Math.min(chunk.pcm.length, out.length - offset);
 			for (let k = 0; k < n; k++) out[offset + k] += chunk.pcm[k];
 		}
+		// Seams are equal-power crossfades of two limited chunks; limit the sum too.
+		const limit = options.outputLimit ?? 0.8;
+		if (any && limit > 0) softLimit(out, limit);
 		return any ? out : null;
 	}
 }

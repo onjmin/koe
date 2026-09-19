@@ -18,7 +18,12 @@ type WorldlineTimelineConfig struct {
 	IntonationStrength    float64
 	PitchCurve            *PitchCurve
 	// SourcePitchesはplan.Unitsと同じ順のユニット収録ピッチ(Hz)。0や欠損は基準値で補う。
-	SourcePitches       []float64
+	SourcePitches []float64
+	// FlatBasePitchはF0曲線の土台をユニットごとの収録ピッチではなく基準ピッチ(収録ピッチの中央値)
+	// 一定にする。HTS等の外部韻律(PitchCurve)を移植するときに使う: 土台がユニットごとに
+	// 244〜291Hzのように揺れると、移植した輪郭にユニット単位の段差(最大数百cent)が乗り、
+	// 継ぎ接ぎに聞こえる。ユニットのtone(リサンプラの基準音)は従来どおり収録ピッチのまま。
+	FlatBasePitch       bool
 	CVVCTiming          string
 	CVVCTransitionGain  float64
 	CVVCPreBoundaryFade bool
@@ -110,6 +115,7 @@ func BuildWorldlineTimeline(synthesisPlan *plan.Plan, cfg WorldlineTimelineConfi
 				continue
 			}
 			phoneUnits[index].OverlapMS = singleCVWorldOverlapMS(synthesisPlan, phoneUnits[index], phoneUnits[index].PreutteranceMS)
+			phoneUnits[index].PreutteranceMS = singleCVVowelJoinPreutteranceMS(synthesisPlan, phoneUnits[index])
 		}
 	}
 	phoneTimings, phraseStartMS := openUtauPhoneTimingsWithCoda(phoneUnits, cfg.CVVCTiming, true)
@@ -166,10 +172,19 @@ func BuildWorldlineTimeline(synthesisPlan *plan.Plan, cfg WorldlineTimelineConfi
 		pitchFactors[i] = intonation[i] * effectiveUnitPitchFactor(unit, cfg.ApplyPitch)
 	}
 
+	curvePitches, curveFactors := pitches, pitchFactors
+	if cfg.FlatBasePitch {
+		curvePitches = make([]float64, len(units))
+		for i := range curvePitches {
+			curvePitches[i] = reference
+		}
+		curveFactors = identityFactors(len(units))
+	}
+
 	frameMS := worldlineFrameMS
 	curveStartMS := -leadingMS
 	curveDurationMS := synthesisPlan.DurationMS + cfg.ReleaseMS + leadingMS
-	f0Curve := worldlineF0CurveAtOffset(synthesisPlan, pitches, pitchFactors, reference,
+	f0Curve := worldlineF0CurveAtOffset(synthesisPlan, curvePitches, curveFactors, reference,
 		max(2, int(math.Ceil(curveDurationMS/frameMS))+2), frameMS, curveStartMS)
 	for frame := range f0Curve {
 		f0Curve[frame] *= pitchCurveFactorAt(cfg.PitchCurve, curveStartMS+float64(frame)*frameMS)
@@ -193,7 +208,7 @@ func BuildWorldlineTimeline(synthesisPlan *plan.Plan, cfg WorldlineTimelineConfi
 			unitPitch = reference
 		}
 		unit.SourceF0Hz = pitches[i]
-		unit.TargetF0Hz = unitPitch * pitchFactors[i] * pitchCurveFactorAt(cfg.PitchCurve, unit.NoteStartMS)
+		unit.TargetF0Hz = curvePitches[i] * curveFactors[i] * pitchCurveFactorAt(cfg.PitchCurve, unit.NoteStartMS)
 		unit.IntonationFactor = intonation[i]
 
 		singleCVUnit := synthesisPlan.SingleCV && unit.Role == "mora"

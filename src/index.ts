@@ -106,13 +106,35 @@ export type {
 	HtsProsodyFrames,
 } from "./utautts/hts.js";
 export { alignHtsProsody } from "./utautts/hts.js";
-export type { FeatureFrame, NjdNode } from "./utautts/openjtalk_features.js";
+export type {
+	FeatureFrame,
+	NjdNode,
+	PauseKind,
+} from "./utautts/openjtalk_features.js";
 export {
 	analyze as openjtalkAnalyze,
+	pauseKind,
 	sparse_features,
 } from "./utautts/openjtalk_features.js";
 export type { ShapeProsodyOptions } from "./utautts/prosody_rules.js";
-export { isQuestion, shapeProsody } from "./utautts/prosody_rules.js";
+export {
+	isQuestion,
+	shapeDurations,
+	shapeProsody,
+	warpPitchCurve,
+} from "./utautts/prosody_rules.js";
+export type {
+	SpeakingStyle,
+	SpeakingStyleInput,
+	SpeakingStyleName,
+} from "./utautts/style.js";
+export {
+	resolveSpeakingStyle,
+	SPEAKING_STYLES,
+	styleAlignOptions,
+	styleRenderOptions,
+	styleShapeOptions,
+} from "./utautts/style.js";
 export type {
 	UtauTTSChunk,
 	UtauTTSOptions,

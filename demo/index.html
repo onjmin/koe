@@ -394,7 +394,7 @@
       <!-- TTS synthesis -->
       <div class="sub">
         <h3>④ UtauTTS 読み上げ</h3>
-        <p class="hint">日本語のテキストを入力して、UtauTTS の読み上げ（worldline 合成）を試します。韻律は HTS 音声モデル（東北大学 伊藤・能勢研究室 tohoku-f01, CC BY 4.0）の音素長と F0 を UTAU 音源に移植するか、UtauTTS の TCN モデルを選べます。HTS では「？」の語尾上げ、F0 に連動した音量の抑揚、無声化母音（です・ます）の減音を規則で重ねます。必要なアセット（辞書など約 47MB）は音源読み込み後にバックグラウンドで取得し、ブラウザにキャッシュされます。</p>
+        <p class="hint">日本語のテキストを入力して、UtauTTS の読み上げ（worldline 合成）を試します。韻律は HTS 音声モデル（東北大学 伊藤・能勢研究室 tohoku-f01, CC BY 4.0。標準・喜び・悲しみ・怒りの 4 感情、各約 2MB を選択時に取得）の音素長と F0 を UTAU 音源に移植するか、UtauTTS の TCN モデルを選べます。HTS では「？」の語尾上げ、無声化母音（です・ます）の減音、句読点別のポーズ長（「。」650ms／「、」380ms）、モーラ長のコントラスト拡大を規則で重ねます。合成後はユニットごとの母音音量を実測して平準化し、F0 に連動した滑らかな音量の抑揚を掛け、母音どうしの境界は長めにクロスフェードします。テキストは漢字かな交じりで入力してください（ひらがなだけだと辞書引きできず「あくたがわ」が「あくた／が／わ」のように分かれてアクセントが崩れます）。必要なアセット（辞書など約 47MB）は音源読み込み後にバックグラウンドで取得し、ブラウザにキャッシュされます。</p>
         <div class="field">
           <input type="text" id="ttsText" class="grow" placeholder="こんにちは、私の名前はkoeです。" style="padding: 6px; font-family: 'DotGothic16', monospace; background: var(--panel2); color: var(--ink); border: var(--px) solid var(--line);" />
         </div>
@@ -404,9 +404,25 @@
             <option value="hts" selected>HTS (tohoku-f01) の音素長と F0 を移植</option>
             <option value="tcn">UtauTTS TCN v8</option>
           </select>
+          <label for="ttsVoice">感情 (HTS)</label>
+          <select id="ttsVoice">
+            <option value="neutral" selected>標準 (neutral)</option>
+            <option value="happy">喜び (happy)</option>
+            <option value="sad">悲しみ (sad)</option>
+            <option value="angry">怒り (angry)</option>
+          </select>
+          <label for="ttsStyle">話し方</label>
+          <select id="ttsStyle">
+            <option value="neutral" selected>標準</option>
+            <option value="calm">落ち着いた朗読</option>
+            <option value="lively">元気</option>
+          </select>
           <label for="ttsStrength">抑揚</label>
           <input type="range" id="ttsStrength" min="0" max="4" step="0.1" value="1" />
           <span id="ttsStrengthVal">×1.0</span>
+          <label for="ttsSpeed">話速</label>
+          <input type="range" id="ttsSpeed" min="0.6" max="1.4" step="0.05" value="1" />
+          <span id="ttsSpeedVal">×1.00</span>
         </div>
         <button class="btn blue" id="ttsPlayBtn">♪ TTS 読み上げ</button>
         <div class="progress"><div class="progress-bar" id="ttsProgress"></div></div>
@@ -452,6 +468,7 @@
       unzipToFileMap, zipFiles,
       generateOtoForFile, summarise, suffixFromFolderName, encodeOto,
       UtauTTSAdapter, openjtalkAnalyze, alignHtsProsody, shapeProsody, isQuestion,
+      resolveSpeakingStyle, styleAlignOptions, styleShapeOptions, styleRenderOptions,
       fetchAsset, fetchAssetText, fetchAssetBytes, loadNaistJdic, initJpreprocessDictionary
     } from './index.js';
 
@@ -1258,7 +1275,26 @@
     const ttsStatus = $('ttsStatus');
     const ttsProgress = $('ttsProgress');
     const ttsText = $('ttsText');
+    const ttsVoice = $('ttsVoice');
     const TTS_BASE = './utautts/';
+
+    // tohoku-f01 ships four emotions (CC BY 4.0, ~1.6–2.2 MB each). Only the
+    // selected one is fetched (Cache API) and loaded into jbonsai; switching
+    // re-runs init_voice, which replaces the loaded model.
+    const HTS_VOICES = {
+      neutral: 'tohoku-f01-neutral.htsvoice',
+      happy: 'tohoku-f01-happy.htsvoice',
+      sad: 'tohoku-f01-sad.htsvoice',
+      angry: 'tohoku-f01-angry.htsvoice',
+    };
+    let loadedVoice = null;
+    async function ensureVoice(name, onProgress) {
+      if (loadedVoice === name) return;
+      const file = HTS_VOICES[name] ?? HTS_VOICES.neutral;
+      const bytes = await fetchAssetBytes(TTS_BASE + 'hts/' + file, onProgress ? { onProgress } : {});
+      jpreprocess.init_voice(bytes);
+      loadedVoice = name;
+    }
 
     // The heavy assets (jpreprocess wasm + naist-jdic dictionary, UtauTTS wasm,
     // TCN model) are fetched once, stored in the Cache API, and warmed up in the
@@ -1296,9 +1332,8 @@
           await UtauTTSAdapter.initializeWasm(TTS_BASE + 'utautts.wasm', { fetch: url => fetchAsset(url, { onProgress }) });
           UtauTTSAdapter.setModel(await fetchAssetText(TTS_BASE + 'frame-intonation-v8.json', { onProgress }));
         })();
-        const htsVoiceReady = fetchAssetBytes(TTS_BASE + 'hts/tohoku-f01-neutral.htsvoice', { onProgress });
-        const [worldline, , , htsVoice] = await Promise.all([worldlineReady, jpreprocessReady, utauttsReady, htsVoiceReady]);
-        if (!jpreprocess.is_voice_ready()) jpreprocess.init_voice(htsVoice);
+        const htsVoiceReady = jpreprocessReady.then(() => ensureVoice(ttsVoice.value, onProgress));
+        const [worldline] = await Promise.all([worldlineReady, jpreprocessReady, utauttsReady, htsVoiceReady]);
         setProgress(ttsProgress, 1);
         setLog(ttsStatus, '✓ TTS 準備完了');
         return new UtauTTSAdapter(worldline);
@@ -1311,6 +1346,17 @@
     const ttsProsody = $('ttsProsody');
     const ttsStrength = $('ttsStrength');
     ttsStrength.addEventListener('input', () => { $('ttsStrengthVal').textContent = '×' + Number(ttsStrength.value).toFixed(1); });
+    const ttsSpeed = $('ttsSpeed');
+    ttsSpeed.addEventListener('input', () => { $('ttsSpeedVal').textContent = '×' + Number(ttsSpeed.value).toFixed(2); });
+    // A style preset sets the sliders; the sliders then act as overrides on top of it.
+    const ttsStyle = $('ttsStyle');
+    ttsStyle.addEventListener('change', () => {
+      const style = resolveSpeakingStyle(ttsStyle.value);
+      ttsStrength.value = String(style.intonation);
+      ttsSpeed.value = String(style.speed);
+      ttsStrength.dispatchEvent(new Event('input'));
+      ttsSpeed.dispatchEvent(new Event('input'));
+    });
 
     ttsPlayBtn.addEventListener('click', async () => {
       if (!engine || !currentManifest) {
@@ -1335,18 +1381,22 @@
 
         setLog(ttsStatus, 'UtauTTS 推論中…');
         const intonationStrength = Number(ttsStrength.value);
+        const style = resolveSpeakingStyle({ preset: ttsStyle.value, intonation: intonationStrength, speed: Number(ttsSpeed.value) });
         let prosody = null;
         let prosodyNote = '';
         if (ttsProsody.value === 'hts') {
           // HTS (jbonsai) decides mora lengths + F0; UtauTTS keeps unit selection and placement.
-          const frames = JSON.parse(jpreprocess.analyze_prosody(text, 1.0));
-          prosody = alignHtsProsody(frames, features, { intonationStrength });
+          // HTS speed: 1 = the voice model's own rate (~7 morae/s); 0.85–0.9 gives a calmer reading pace.
+          if (loadedVoice !== ttsVoice.value) setLog(ttsStatus, `HTS 音声 (${ttsVoice.value}) 取得中…`);
+          await ensureVoice(ttsVoice.value);
+          const frames = JSON.parse(jpreprocess.analyze_prosody(text, style.speed));
+          prosody = alignHtsProsody(frames, features, styleAlignOptions(style));
           if (!prosody) {
             prosodyNote = ' / HTS 韻律をモーラに整列できず TCN で合成';
             console.warn('[tts] HTS prosody could not be aligned to the morae; falling back to TCN', { features, frames });
           } else {
-            // Rule residuals: question rise on 「？」, pitch-coupled loudness, devoiced morae softer.
-            prosody = shapeProsody(prosody, features, { question: isQuestion(text) });
+            // Rule residuals: question rise on 「？」, devoiced morae softer, pauses / duration contrast / pitch shift per style.
+            prosody = shapeProsody(prosody, features, { ...styleShapeOptions(style), question: isQuestion(text) });
             console.log('[tts] hts prosody', prosody, frames);
           }
         }
@@ -1361,7 +1411,7 @@
         let anchor = null;   // AudioContext time that corresponds to timeline 0
         let chunks = 0, firstAudioMs = 0;
         const totalMs = plan.timeline.duration_ms;
-        for await (const chunk of adapter.renderChunks(engine.voiceBank, plan, { signal: abort.signal })) {
+        for await (const chunk of adapter.renderChunks(engine.voiceBank, plan, { ...styleRenderOptions(style), signal: abort.signal })) {
           const now = audioCtx.currentTime;
           if (anchor === null) {
             anchor = now + 0.08 - chunk.startMs / 1000;

@@ -12,6 +12,12 @@ export interface NjdNode {
 export interface FeatureFrame {
     mora: string;
     pause: boolean;
+    /**
+     * For pause frames: the token that produced the pause (「。」「、」「？」, a
+     * space, a bracket…). Lets prosody rules pick a pause length per kind.
+     * Absent on pauses synthesised from a reading string.
+     */
+    punctuation?: string;
     accent_phrase_position?: number;
     accent_phrase_length?: number;
     accent_nucleus?: number;
@@ -61,6 +67,32 @@ function isHigh(position: number, accent: number): boolean {
     return position >= 2;
 }
 
+/** Pause kinds a punctuation token maps to (see {@link pauseKind}). */
+export type PauseKind = "sentence" | "clause" | "space";
+
+const SENTENCE_END = /[。．！？!?.]/u;
+const CLAUSE = /[、，,]/u;
+
+/**
+ * Classify the token that produced a pause: sentence-final punctuation, a
+ * clause comma, or whitespace / anything else (brackets, symbols).
+ */
+export function pauseKind(punctuation: string | undefined): PauseKind {
+    if (punctuation === undefined) return "clause";
+    if (SENTENCE_END.test(punctuation)) return "sentence";
+    if (CLAUSE.test(punctuation)) return "clause";
+    return "space";
+}
+
+function pauseRank(punctuation: string | undefined): number {
+    if (punctuation === undefined) return 0;
+    switch (pauseKind(punctuation)) {
+        case "sentence": return 3;
+        case "clause": return 2;
+        default: return 1;
+    }
+}
+
 export function analyze(nodes: NjdNode[]): { reading: string, features: FeatureFrame[] } {
     const reading_parts: string[] = [];
     const result: FeatureFrame[] = [];
@@ -71,8 +103,12 @@ export function analyze(nodes: NjdNode[]): { reading: string, features: FeatureF
         const pronunciation = (node.pron || "").replace(/'/g, "").replace(/’/g, "");
         if (node.mora_size === 0 || PUNCTUATION.has(node.string)) {
             reading_parts.push(node.string || "、");
-            if (result.length > 0 && !result[result.length - 1].pause) {
-                result.push({ mora: "", pause: true });
+            const last = result[result.length - 1];
+            if (result.length > 0 && !last.pause) {
+                result.push({ mora: "", pause: true, punctuation: node.string || "、" });
+            } else if (last?.pause && pauseRank(node.string) > pauseRank(last.punctuation)) {
+                // 「。」 followed by a space or a closing bracket: keep the strongest token.
+                last.punctuation = node.string;
             }
             index++;
             continue;

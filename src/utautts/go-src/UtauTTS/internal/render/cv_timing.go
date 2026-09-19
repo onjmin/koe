@@ -16,10 +16,15 @@ const (
 	singleCVVowelTailRatio        = 0.35
 	singleCVDefaultVowelOverlapMS = 18.0
 	singleCVSameVowelOverlapMS    = 24.0
-	vcvMinimumPreutteranceMS      = 48
-	vcvMaximumPreutteranceMS      = 150
-	vcvMinimumVowelTailMS         = 45
-	vcvVowelTailRatio             = 0.30
+	// 母音→母音の境界(「はすいけ」の す→い 等)には録音された遷移が無い。
+	// 短いクロスフェードでは音節が切れて聞こえるため、話し言葉では自然な
+	// フォルマント遷移(40〜80ms)に寄せて長めに重ね、短いモーラでは両側の半分までに抑える。
+	singleCVVowelJoinMS      = 50.0
+	singleCVVowelJoinRatio   = 0.5
+	vcvMinimumPreutteranceMS = 48
+	vcvMaximumPreutteranceMS = 150
+	vcvMinimumVowelTailMS    = 45
+	vcvVowelTailRatio        = 0.30
 )
 
 func normalizePlanTiming(synthesisPlan *plan.Plan, unit plan.Unit, releaseMS float64) effectiveTiming {
@@ -230,16 +235,46 @@ func singleCVWorldOverlapMS(synthesisPlan *plan.Plan, unit plan.Unit, preutteran
 	overlap := math.Max(0, unit.OverlapMS)
 	overlap = math.Min(overlap, singleCVOnsetFadeInMS(synthesisPlan, unit))
 	if singleCVVowelBoundaryWithoutOnset(synthesisPlan, unit) {
-		// 単独母音はotoのoverlap=0でも前の母音と短く重ねる。
-		if overlap <= 0 {
-			overlap = singleCVDefaultVowelOverlapMS
-			if sameSingleCVVowel(synthesisPlan, unit.Position) {
-				overlap = singleCVSameVowelOverlapMS
-			}
+		// 単独母音はotoのoverlapに関わらず前の母音と長めに重ねる(singleCVVowelJoinMS)。
+		// モーラが短いときは前後それぞれの半分を上限にし、otoのoverlapが0でも
+		// 従来の最小値(18/24ms)は保つ。
+		floor := singleCVDefaultVowelOverlapMS
+		if sameSingleCVVowel(synthesisPlan, unit.Position) {
+			floor = singleCVSameVowelOverlapMS
 		}
-		return math.Min(overlap, singleCVOnsetFadeInMS(synthesisPlan, unit))
+		join := math.Max(math.Max(0, unit.OverlapMS), singleCVVowelJoinMS)
+		if limit := singleCVVowelJoinLimitMS(synthesisPlan, unit); limit > 0 {
+			join = math.Min(join, math.Max(floor, limit))
+		}
+		return join
 	}
 	return math.Min(overlap, math.Max(0, preutteranceMS))
+}
+
+// singleCVVowelJoinPreutteranceMSは母音連結のクロスフェードが境界の前後に均等に掛かるよう、
+// 単独母音の先行発声を重なりの半分まで引き上げる(母音サンプルのpreutteranceは数msしかない)。
+// 母音連結でないユニットは元の値のまま。
+func singleCVVowelJoinPreutteranceMS(synthesisPlan *plan.Plan, unit plan.Unit) float64 {
+	if !singleCVVowelBoundaryWithoutOnset(synthesisPlan, unit) {
+		return unit.PreutteranceMS
+	}
+	return math.Max(unit.PreutteranceMS, unit.OverlapMS/2)
+}
+
+// singleCVVowelJoinLimitMSは母音連結の重なりの上限: 前後のモーラ長の短い方のsingleCVVowelJoinRatio。
+// 計画にユニット長が無いときは0(無制限)。
+func singleCVVowelJoinLimitMS(synthesisPlan *plan.Plan, unit plan.Unit) float64 {
+	if synthesisPlan == nil || unit.DurationMS <= 0 {
+		return 0
+	}
+	shortest := unit.DurationMS
+	for _, other := range synthesisPlan.Units {
+		if other.Role == "mora" && !other.Silent && other.Position == unit.Position-1 && other.DurationMS > 0 {
+			shortest = math.Min(shortest, other.DurationMS)
+			break
+		}
+	}
+	return shortest * singleCVVowelJoinRatio
 }
 
 func singleCVVowelBoundaryWithoutOnset(synthesisPlan *plan.Plan, unit plan.Unit) bool {

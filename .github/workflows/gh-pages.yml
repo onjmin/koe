@@ -114,7 +114,11 @@ jobs:
             docs/demo/world/worldline.wasm \
             docs/demo/utautts/utautts.wasm \
             docs/demo/utautts/wasm_exec.js \
-            docs/demo/utautts/frame-intonation-v8.json             docs/demo/utautts/hts/tohoku-f01-neutral.htsvoice \
+            docs/demo/utautts/frame-intonation-v8.json \
+            docs/demo/utautts/hts/tohoku-f01-neutral.htsvoice \
+            docs/demo/utautts/hts/tohoku-f01-happy.htsvoice \
+            docs/demo/utautts/hts/tohoku-f01-sad.htsvoice \
+            docs/demo/utautts/hts/tohoku-f01-angry.htsvoice \
             docs/demo/utautts/jpreprocess_wasm/jpreprocess_wasm.js \
             docs/demo/utautts/jpreprocess_wasm/jpreprocess_wasm_bg.wasm \
             docs/demo/utautts/jpreprocess_wasm/naist-jdic/dict.da.gz \

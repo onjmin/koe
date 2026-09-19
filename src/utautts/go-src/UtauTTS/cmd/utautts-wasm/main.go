@@ -237,6 +237,8 @@ func utauttsPlan(this js.Value, args []js.Value) any {
 		IntonationStrength:    speech.IntonationStrength,
 		PitchCurve:            speech.PitchCurve,
 		SourcePitches:         sourcePitches,
+		// 外部韻律を移植するときはユニットの収録ピッチ差を輪郭に乗せない。
+		FlatBasePitch: req.PitchCurve != nil,
 	})
 	if err != nil {
 		return errorToJS(fmt.Sprintf("timeline error: %v", err))

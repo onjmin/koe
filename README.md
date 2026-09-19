@@ -323,6 +323,7 @@ if (audio) {
 ```ts
 import {
   VoiceBank, Worldline, UtauTTSAdapter, openjtalkAnalyze, alignHtsProsody, shapeProsody, isQuestion,
+  resolveSpeakingStyle, styleAlignOptions, styleShapeOptions, styleRenderOptions,
   fetchAsset, fetchAssetBytes, fetchAssetText, loadNaistJdic, initJpreprocessDictionary,
 } from "@onjmin/koe";
 import initJpreprocess, * as jpreprocess from "./utautts/jpreprocess_wasm/jpreprocess_wasm.js";
@@ -343,17 +344,21 @@ const { features } = openjtalkAnalyze(JSON.parse(jpreprocess.analyze_text(text))
 
 // 韻律は 2 通り。HTS 音声モデルの音素長と F0 を移植する（推奨、アクセントの起伏が大きい）か、
 // UtauTTS の TCN モデルに任せる（prosody を渡さない）。
+// tohoku-f01 は neutral / happy / sad / angry の 4 感情（CC BY 4.0、各約 2MB）。init_voice を呼び直せば差し替わる
 jpreprocess.init_voice(await fetchAssetBytes("./utautts/hts/tohoku-f01-neutral.htsvoice"));
-const frames = JSON.parse(jpreprocess.analyze_prosody(text, 1.0));   // 音素ごとの長さ + 5ms 刻みの F0（第 3 引数は F0 の GV 重み。GV を持つ音声モデルでのみ有効、tohoku-f01 には無い）
-let prosody = alignHtsProsody(frames, features, { intonationStrength: 1 }); // モーラに整列（失敗時 null）
-// 規則による残差: 「？」で終わる文の語尾上げ、F0 に連動した音量の抑揚、無声化母音（です・ます）の減音
-if (prosody) prosody = shapeProsody(prosody, features, { question: isQuestion(text) });
+// 話し方: "neutral" / "calm"（朗読調）/ "lively"、またはプリセット＋上書き（{ preset: "calm", speed: 0.95 }）
+const style = resolveSpeakingStyle("calm");
+const frames = JSON.parse(jpreprocess.analyze_prosody(text, style.speed));   // 音素ごとの長さ + 5ms 刻みの F0。第 2 引数は話速（1 = モデルの速さ、約 7 モーラ/秒）、第 3 引数は F0 の GV 重み（GV を持つ音声モデルでのみ有効、tohoku-f01 には無い）
+let prosody = alignHtsProsody(frames, features, styleAlignOptions(style)); // モーラに整列（失敗時 null）。抑揚幅 = intonationStrength
+// 規則による残差: 「？」で終わる文の語尾上げ、無声化母音（です・ます）の減音、
+// 句読点別のポーズ長（「。」650ms／「、」380ms × pauseScale）、モーラ長のコントラスト拡大（HTS の過平滑化を補う）、基準ピッチのシフト
+if (prosody) prosody = shapeProsody(prosody, features, { ...styleShapeOptions(style), question: isQuestion(text) });
 const plan = tts.plan(bank, text, features, { prosody: prosody ?? undefined }); // 選択・タイミング・F0 曲線・worldline 配置
 
 // チャンクごとに合成 → 届いた順にスケジュールすると数モーラ分で再生が始まる
 const ctx = new AudioContext({ sampleRate: 48000 });
 const t0 = ctx.currentTime + 0.1;
-for await (const chunk of tts.renderChunks(bank, plan)) {
+for await (const chunk of tts.renderChunks(bank, plan, styleRenderOptions(style))) { // 合成後にユニット音量の平準化と F0 連動の音量曲線を掛ける
   const buf = ctx.createBuffer(1, chunk.pcm.length, 48000);
   buf.copyToChannel(chunk.pcm, 0);
   const src = ctx.createBufferSource();
@@ -404,7 +409,8 @@ const pcmOffset = pcmBase(jsonLength); // PCM データの開始バイト位置
 | `Worldline` | WORLD ボコーダによる高品質ノート合成 |
 | `UtauTTSAdapter` | UtauTTS プランナー (Wasm) + worldline による日本語読み上げ。`plan` / `renderChunks` / `synthesizeText` |
 | `openjtalkAnalyze`, `sparse_features`, `readingFromFeatures` | jpreprocess の NJD 出力 → モーラ特徴量・読み |
-| `alignHtsProsody`, `shapeProsody`, `isQuestion` | HTS の音素長・F0 をモーラに整列し、疑問の語尾上げ・音量包絡・無声化の規則を重ねる |
+| `resolveSpeakingStyle`, `SPEAKING_STYLES`, `styleAlignOptions` / `styleShapeOptions` / `styleRenderOptions` | 話し方プリセット（neutral / calm / lively）: 話速・抑揚・基準ピッチ・ポーズ倍率・モーラ長コントラスト・音量曲線の束を各段のオプションに展開 |
+| `alignHtsProsody`, `shapeProsody`, `isQuestion` | HTS の音素長・F0 をモーラに整列し、疑問の語尾上げ・無声化・句読点別ポーズ長・モーラ長コントラストの規則を重ねる（`shapeDurations` / `warpPitchCurve` / `pauseKind` も個別に利用可）。F0 連動の音量包絡とユニット音量の平準化は `renderChunks` がレンダリング後に滑らかなゲイン曲線として掛ける |
 | `fetchAsset`, `loadNaistJdic`, `initJpreprocessDictionary` | Cache API 付きアセット取得と naist-jdic 辞書の読み込み |
 | `generateOto` | wav 群 → oto.ini エントリを推定 (原音設定) |
 | `generateOtoForFile` | wav 1本ぶんの推定 (進捗表示したいとき用) |

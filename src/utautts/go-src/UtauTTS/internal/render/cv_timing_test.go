@@ -129,13 +129,44 @@ func TestSingleCVWorldOverlapAddsVowelBoundaryBlend(t *testing.T) {
 	p := &plan.Plan{SingleCV: true, Morae: []frontend.Mora{
 		{Vowel: "a"}, {Vowel: "a"}, {Vowel: "i"}, {Consonant: "k", Vowel: "a"},
 	}}
-	if got := singleCVWorldOverlapMS(p, plan.Unit{Position: 1}, 0); got != singleCVSameVowelOverlapMS {
-		t.Fatalf("same-vowel overlap = %.3f, want %.3f", got, singleCVSameVowelOverlapMS)
+	// ユニット長が不明なら話し言葉向けの長い重なりをそのまま使う。
+	if got := singleCVWorldOverlapMS(p, plan.Unit{Position: 1}, 0); got != singleCVVowelJoinMS {
+		t.Fatalf("same-vowel overlap = %.3f, want %.3f", got, singleCVVowelJoinMS)
 	}
-	if got := singleCVWorldOverlapMS(p, plan.Unit{Position: 2}, 0); got != singleCVDefaultVowelOverlapMS {
-		t.Fatalf("vowel overlap = %.3f, want %.3f", got, singleCVDefaultVowelOverlapMS)
+	if got := singleCVWorldOverlapMS(p, plan.Unit{Position: 2}, 0); got != singleCVVowelJoinMS {
+		t.Fatalf("vowel overlap = %.3f, want %.3f", got, singleCVVowelJoinMS)
+	}
+	// otoのoverlapが重なりより長ければそれを尊重する。
+	if got := singleCVWorldOverlapMS(p, plan.Unit{Position: 2, OverlapMS: 60}, 0); got != 60 {
+		t.Fatalf("oto overlap was shortened to %.3f", got)
 	}
 	if got := singleCVWorldOverlapMS(p, plan.Unit{Position: 3}, 0); got != 0 {
 		t.Fatalf("consonant onset overlap = %.3f, want 0", got)
+	}
+}
+
+func TestSingleCVVowelJoinShrinksForShortMorae(t *testing.T) {
+	p := &plan.Plan{SingleCV: true, Morae: []frontend.Mora{{Vowel: "a"}, {Vowel: "i"}, {Vowel: "u"}}, Units: []plan.Unit{
+		{Role: "mora", Position: 0, DurationMS: 60},
+		{Role: "mora", Position: 1, DurationMS: 200},
+		{Role: "mora", Position: 2, DurationMS: 20},
+	}}
+	// 前のモーラ60msの半分。
+	if got := singleCVWorldOverlapMS(p, p.Units[1], 0); got != 30 {
+		t.Fatalf("short previous mora: overlap = %.3f, want 30", got)
+	}
+	// 極端に短くても従来の最小値は保つ。
+	if got := singleCVWorldOverlapMS(p, p.Units[2], 0); got != singleCVDefaultVowelOverlapMS {
+		t.Fatalf("tiny mora: overlap = %.3f, want %.3f", got, singleCVDefaultVowelOverlapMS)
+	}
+	// 先行発声は重なりの半分まで引き上げ、子音始まりは変えない。
+	unit := p.Units[1]
+	unit.OverlapMS = singleCVWorldOverlapMS(p, unit, 0)
+	if got := singleCVVowelJoinPreutteranceMS(p, unit); got != 15 {
+		t.Fatalf("vowel join preutterance = %.3f, want 15", got)
+	}
+	cv := &plan.Plan{SingleCV: true, Morae: []frontend.Mora{{Vowel: "a"}, {Consonant: "k", Vowel: "a"}}}
+	if got := singleCVVowelJoinPreutteranceMS(cv, plan.Unit{Position: 1, PreutteranceMS: 40, OverlapMS: 100}); got != 40 {
+		t.Fatalf("consonant onset preutterance changed to %.3f", got)
 	}
 }

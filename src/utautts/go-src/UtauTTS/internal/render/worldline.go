@@ -108,6 +108,7 @@ func renderWorldlineEngine(synthesisPlan *plan.Plan, cfg Config, providerID stri
 					continue
 				}
 				phoneUnits[index].OverlapMS = singleCVWorldOverlapMS(synthesisPlan, phoneUnits[index], phoneUnits[index].PreutteranceMS)
+				phoneUnits[index].PreutteranceMS = singleCVVowelJoinPreutteranceMS(synthesisPlan, phoneUnits[index])
 			}
 		}
 		phoneTimings, phraseStartMS = openUtauPhoneTimingsWithCoda(phoneUnits, cfg.CVVCTiming, true)

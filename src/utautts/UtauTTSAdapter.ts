@@ -47,14 +47,23 @@ export class UtauTTSAdapter {
      * Wasmモジュールを初期化します。
      */
     static async initializeWasm(wasmUrl: string = "utautts.wasm") {
+        if (typeof utautts_plan === "function") {
+            return; // 既にロード済み
+        }
         if (typeof Go === "undefined") {
             throw new Error("wasm_exec.js must be loaded before calling initializeWasm.");
         }
         const go = new Go();
-        const response = await fetch(wasmUrl);
-        const buffer = await response.arrayBuffer();
-        const result = await WebAssembly.instantiate(buffer, go.importObject);
-        go.run(result.instance); // 実行をバックグラウンドで開始
+        try {
+            const result = await WebAssembly.instantiateStreaming(fetch(wasmUrl), go.importObject);
+            go.run(result.instance);
+        } catch (e) {
+            // Fallback for servers not serving application/wasm MIME type
+            const response = await fetch(wasmUrl);
+            const buffer = await response.arrayBuffer();
+            const result = await WebAssembly.instantiate(buffer, go.importObject);
+            go.run(result.instance);
+        }
         
         // 関数が登録されるまで少し待つ
         await new Promise(resolve => setTimeout(resolve, 50));

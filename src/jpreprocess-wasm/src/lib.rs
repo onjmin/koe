@@ -115,13 +115,19 @@ fn with_engine<T>(f: impl FnOnce(&JPreprocess<DefaultTokenizer>) -> Result<T, Js
 /// テキストを NJD ノード列 (JSON 文字列) にする。各ノードは
 /// `{string, pos, pos_group1, pron, read, acc, mora_size, chain_flag}`。
 /// 半角英数などは naist-jdic 向けに全角へ正規化してから解析する。
+///
+/// Open JTalk と同じ NJD 前処理 (読みの補完、数字列の読み、アクセント句の連結、
+/// アクセント型、無声化) を掛けてから返す。`extract_fullcontext` / `analyze_prosody`
+/// が見るモーラ列と一致させるためで、これが無いと「2024年」「koe」のような
+/// 数字・英字を含む文で HTS 韻律とモーラ数が食い違い、整列に失敗する。
 #[wasm_bindgen]
 pub fn analyze_text(text: &str) -> Result<String, JsError> {
     with_engine(|engine| {
         let normalized = jpreprocess::normalize_text_for_naist_jdic(text);
-        let njd = engine
+        let mut njd = engine
             .text_to_njd(&normalized)
             .map_err(js_error("text_to_njd"))?;
+        njd.preprocess();
 
         let mut nodes_json = Vec::with_capacity(njd.nodes.len());
         for node in njd.nodes {

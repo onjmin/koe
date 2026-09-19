@@ -1336,12 +1336,15 @@
         setLog(ttsStatus, 'UtauTTS 推論中…');
         const intonationStrength = Number(ttsStrength.value);
         let prosody = null;
+        let prosodyNote = '';
         if (ttsProsody.value === 'hts') {
           // HTS (jbonsai) decides mora lengths + F0; UtauTTS keeps unit selection and placement.
           const frames = JSON.parse(jpreprocess.analyze_prosody(text, 1.0));
           prosody = alignHtsProsody(frames, features, { intonationStrength });
-          if (!prosody) console.warn('[tts] HTS prosody could not be aligned to the morae; falling back to TCN');
-          else {
+          if (!prosody) {
+            prosodyNote = ' / HTS 韻律をモーラに整列できず TCN で合成';
+            console.warn('[tts] HTS prosody could not be aligned to the morae; falling back to TCN', { features, frames });
+          } else {
             // Rule residuals: question rise on 「？」, pitch-coupled loudness, devoiced morae softer.
             prosody = shapeProsody(prosody, features, { question: isQuestion(text) });
             console.log('[tts] hts prosody', prosody, frames);
@@ -1382,7 +1385,7 @@
           setLog(ttsStatus, `合成しながら再生中… ${chunks} chunk — ${reading}`);
         }
         if (!abort.signal.aborted) {
-          setLog(ttsStatus, `✓ ${reading}  (plan ${planMs.toFixed(0)} ms / 初回音声 ${firstAudioMs.toFixed(0)} ms / ${chunks} chunks / ${(totalMs / 1000).toFixed(2)} s)`);
+          setLog(ttsStatus, `✓ ${reading}  (plan ${planMs.toFixed(0)} ms / 初回音声 ${firstAudioMs.toFixed(0)} ms / ${chunks} chunks / ${(totalMs / 1000).toFixed(2)} s${prosodyNote})`);
         }
       } catch (err) {
         setLog(ttsStatus, `✗ ${err.message}`);

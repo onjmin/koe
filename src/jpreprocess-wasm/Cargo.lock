@@ -930,9 +930,10 @@ dependencies = [
 
 [[package]]
 name = "jpreprocess-wasm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "jpreprocess",
+ "lindera-dictionary",
  "serde",
  "serde_json",
  "wasm-bindgen",

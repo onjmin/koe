@@ -85,9 +85,36 @@ export { encodeOto, encodeShiftJis, formatOto } from "./oto/write.js";
 
 // Shared types
 export type { Manifest, PhonemeEntry } from "./types.js";
-
+export type {
+	AssetFetchOptions,
+	AssetProgress,
+	JpreprocessModule,
+	NaistJdicData,
+} from "./utautts/assets.js";
+export {
+	fetchAsset,
+	fetchAssetBytes,
+	fetchAssetText,
+	initJpreprocessDictionary,
+	loadNaistJdic,
+	NAIST_JDIC_FILES,
+} from "./utautts/assets.js";
+export type { FeatureFrame, NjdNode } from "./utautts/openjtalk_features.js";
+export {
+	analyze as openjtalkAnalyze,
+	sparse_features,
+} from "./utautts/openjtalk_features.js";
+export type {
+	UtauTTSChunk,
+	UtauTTSOptions,
+	UtauTTSPlan,
+	UtauTTSRenderOptions,
+	UtauTTSTimeline,
+	UtauTTSTimelineUnit,
+	UtauTTSUnit,
+} from "./utautts/UtauTTSAdapter.js";
 // TTS integration
-export { UtauTTSAdapter } from "./utautts/UtauTTSAdapter.js";
-export type { UtauTTSPlan, UtauTTSUnit } from "./utautts/UtauTTSAdapter.js";
-
-export { analyze as openjtalkAnalyze, sparse_features, FeatureFrame, NjdNode } from './utautts/openjtalk_features.js';
+export {
+	readingFromFeatures,
+	UtauTTSAdapter,
+} from "./utautts/UtauTTSAdapter.js";

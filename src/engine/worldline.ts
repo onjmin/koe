@@ -88,18 +88,44 @@ export interface WorldlineLoadOptions {
  */
 export type CurveInput = number | ((tMs: number, totalMs: number) => number);
 
-const sampleCurve = (input: number, curve: CurveInput, totalMs: number): number =>
-	typeof curve === "function" ? curve(input, totalMs) : curve;
+const sampleCurve = (
+	input: number,
+	curve: CurveInput,
+	totalMs: number,
+): number => (typeof curve === "function" ? curve(input, totalMs) : curve);
 
+/**
+ * One sample placed on a phrase timeline (mirrors worldline's
+ * `PhraseSynth::AddRequest` + the UTAU `SynthRequest` fields that matter for
+ * speech). All times are ms.
+ */
 export interface PhraseUnit {
 	pcm: Float64Array;
+	/** Where the (offset-trimmed) sample head is placed on the phrase timeline. */
 	posMs: number;
+	/** Leading part of the resampled sample to skip before `posMs`. */
 	skipMs: number;
+	/** How much of the resampled sample is used from `posMs`. */
 	lengthMs: number;
 	fadeInMs: number;
 	fadeOutMs: number;
+	/** Fixed (unstretched) consonant region of the sample. */
 	consonantMs: number;
+	/** Trim from the sample tail; defaults to two WORLD frames. */
 	cutMs?: number;
+	/**
+	 * UTAU "required length": the resampler stretches the sample to this total
+	 * length (consonant kept, vowel stretched). Defaults to `lengthMs`. UtauTTS
+	 * rounds it up to 50 ms steps so the vowel loop has slack for the release.
+	 */
+	requiredLengthMs?: number;
+	/** UTAU volume, 100 = unity. */
+	volume?: number;
+	/**
+	 * MIDI note the resampler targets before the F0 curve is applied. Pick the
+	 * note closest to the sample's own pitch to keep the formant shift minimal.
+	 */
+	tone?: number;
 }
 
 export interface RenderPhraseParams {
@@ -279,7 +305,15 @@ export class Worldline {
 	 */
 
 	renderPhrase(params: RenderPhraseParams): Float32Array | null {
-		const { units, pitch, gender = 0.5, tension = 0.5, breathiness = 0.5, voicing = 1.0, tempo = 120 } = params;
+		const {
+			units,
+			pitch,
+			gender = 0.5,
+			tension = 0.5,
+			breathiness = 0.5,
+			voicing = 1.0,
+			tempo = 120,
+		} = params;
 		if (units.length === 0) return null;
 
 		const WL = this.wasm;
@@ -291,7 +325,7 @@ export class Worldline {
 			const endMs = u.posMs + u.lengthMs;
 			if (endMs > totalMs) totalMs = endMs;
 		}
-		
+
 		const ps = WL._PhraseSynthNew();
 		if (!ps) return null;
 
@@ -299,7 +333,7 @@ export class Worldline {
 
 		for (const u of units) {
 			if (!u.pcm || u.pcm.length < MIN_WORLDLINE_SAMPLES) continue;
-			
+
 			const reqPtr = WL._malloc(SYNTH_REQ_SIZE);
 			if (!reqPtr) continue;
 			pointersToFree.push(reqPtr);
@@ -310,21 +344,23 @@ export class Worldline {
 
 			WL.HEAPF64.set(u.pcm, samplePtr >> 3);
 
-			const sv = (off: number, val: number, type: string) => WL.setValue(reqPtr + off, val, type);
+			const sv = (off: number, val: number, type: string) =>
+				WL.setValue(reqPtr + off, val, type);
 			sv(0, FS, "i32");
 			sv(4, u.pcm.length, "i32");
 			sv(8, samplePtr, "*");
 			sv(12, 0, "i32");
 			sv(16, 0, "*");
-			// Use a dummy midi note based on 440Hz, as actual pitch is set via curves later
-			sv(20, 69, "i32"); 
+			// The F0 curve set below overrides per-frame pitch; the tone only seeds
+			// the resampler, so default to A4 unless the caller knows the sample pitch.
+			sv(20, u.tone ?? 69, "i32");
 			sv(24, 100.0, "double");
 			sv(32, 0.0, "double");
-			sv(40, u.lengthMs, "double");
+			sv(40, u.requiredLengthMs ?? u.lengthMs, "double");
 			sv(48, u.consonantMs, "double");
-			const cutMs = u.cutMs ?? (WL_FRAME_MS * 2);
+			const cutMs = u.cutMs ?? WL_FRAME_MS * 2;
 			sv(56, cutMs, "double");
-			sv(64, 100.0, "double");
+			sv(64, u.volume ?? 100.0, "double");
 			sv(72, 0.0, "double");
 			sv(80, tempo, "double");
 			sv(88, 0, "i32");
@@ -336,7 +372,16 @@ export class Worldline {
 			sv(112, 0, "i32");
 			sv(116, 100, "i32");
 
-			WL._PhraseSynthAddRequest(ps, reqPtr, u.posMs, u.skipMs, u.lengthMs, u.fadeInMs, u.fadeOutMs, 0);
+			WL._PhraseSynthAddRequest(
+				ps,
+				reqPtr,
+				u.posMs,
+				u.skipMs,
+				u.lengthMs,
+				u.fadeInMs,
+				u.fadeOutMs,
+				0,
+			);
 		}
 
 		totalMs += WL_FRAME_MS * 2;
@@ -346,7 +391,7 @@ export class Worldline {
 		const tArr = new Float64Array(nFrames);
 		const bArr = new Float64Array(nFrames);
 		const vArr = new Float64Array(nFrames);
-		
+
 		for (let i = 0; i < nFrames; i++) {
 			const tMs = i * WL_FRAME_MS;
 			f0Arr[i] = sampleCurve(tMs, pitch, totalMs);
@@ -361,16 +406,25 @@ export class Worldline {
 		const tPtr = WL._malloc(nFrames * 8);
 		const bPtr = WL._malloc(nFrames * 8);
 		const vPtr = WL._malloc(nFrames * 8);
-		
+
 		if (f0Ptr && gPtr && tPtr && bPtr && vPtr) {
 			WL.HEAPF64.set(f0Arr, f0Ptr >> 3);
 			WL.HEAPF64.set(gArr, gPtr >> 3);
 			WL.HEAPF64.set(tArr, tPtr >> 3);
 			WL.HEAPF64.set(bArr, bPtr >> 3);
 			WL.HEAPF64.set(vArr, vPtr >> 3);
-			WL._PhraseSynthSetCurves(ps, f0Ptr, gPtr, tPtr, bPtr, vPtr, nFrames, WL_FRAME_MS);
+			WL._PhraseSynthSetCurves(
+				ps,
+				f0Ptr,
+				gPtr,
+				tPtr,
+				bPtr,
+				vPtr,
+				nFrames,
+				WL_FRAME_MS,
+			);
 		}
-		
+
 		if (f0Ptr) WL._free(f0Ptr);
 		if (gPtr) WL._free(gPtr);
 		if (tPtr) WL._free(tPtr);
@@ -416,7 +470,11 @@ export class Worldline {
 		const FS = WORLDLINE_SAMPLE_RATE;
 		// Representative pitch for the resampler's target note — the midpoint of
 		// the vowel sustain when pitch is a curve, otherwise the flat value.
-		const basePitch = sampleCurve(preMs + durationMs / 2, pitch, preMs + durationMs);
+		const basePitch = sampleCurve(
+			preMs + durationMs / 2,
+			pitch,
+			preMs + durationMs,
+		);
 		const midiNote = Math.round(69 + 12 * Math.log2(basePitch / 440));
 		const posMs = 0; // no leading silence
 		const reqLen = preMs + durationMs; // render lead-in/consonant + vowel

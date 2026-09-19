@@ -299,6 +299,77 @@ func SynthesizeWithOptions(cfg Config, providerOptions render.ProviderOptions) (
 	if synthesizer, found := neuralSynthesizerForProvider(providerID); found {
 		return synthesizer.Synthesize(cfg)
 	}
+	prep, err := prepareSpeech(cfg)
+	if err != nil {
+		return nil, err
+	}
+	cfg = prep.cfg
+	bank, morae, synthesisPlan := prep.bank, prep.morae, prep.synthesisPlan
+	pitchCurve, automaticPitchCurve := prep.pitchCurve, prep.automaticPitchCurve
+	applyPitch, intonationStrength := prep.applyPitch, prep.intonationStrength
+	providerOptions.Worldline.SpeechPitchReference = experimentalSpeechPitch(cfg) && applyPitch
+	rendered, err := render.RenderWithReport(synthesisPlan, render.Config{
+		Context:                 cfg.Context,
+		Engine:                  cfg.Engine,
+		ReleaseMS:               cfg.ReleaseMS,
+		ReleaseSet:              cfg.ReleaseSet,
+		LeadingPreutteranceMS:   cfg.LeadingPreutteranceMS,
+		IntonationStrength:      intonationStrength,
+		ApplyPitch:              applyPitch,
+		Backend:                 cfg.Renderer,
+		ProviderOptions:         providerOptions,
+		BoundaryBridgeMS:        cfg.BoundaryBridgeMS,
+		BoundaryBridgeThreshold: cfg.BoundaryBridgeThreshold,
+		CVVCTiming:              cfg.CVVCTiming,
+		CVVCTransitionGain:      cfg.CVVCTransitionGain,
+		CVVCPreBoundaryFade:     cfg.CVVCPreBoundaryFade,
+		PitchCurve:              pitchCurve,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("render: %w", err)
+	}
+	pcm := rendered.Audio
+	timings := moraTimings(morae, synthesisPlan)
+	moraDurations := make([]float64, len(timings))
+	moraPositions := make([]float64, len(timings))
+	pitchPoints := make([]float64, len(timings))
+	for index, timing := range timings {
+		moraDurations[index] = timing.DurationMS
+		moraPositions[index] = timing.StartMS + timing.DurationMS/2
+		if automaticPitchCurve != nil && !morae[index].Pause {
+			pitchPoints[index] = pitchCurveCentsAt(automaticPitchCurve, moraPositions[index])
+		}
+	}
+	return &Result{
+		Voicebank:       bank,
+		Plan:            synthesisPlan,
+		Audio:           pcm,
+		RenderReport:    &rendered.Report,
+		MoraDurationsMS: moraDurations,
+		MoraPositionsMS: moraPositions,
+		PitchPoints:     pitchPoints,
+	}, nil
+}
+
+// speechPreparationはレンダラーに依存しない合成前半(発音・選択・計画・ピッチ曲線)の結果。
+type speechPreparation struct {
+	cfg                 Config
+	bank                *voicebank.Bank
+	language            string
+	phonemizer          string
+	reading             string
+	morae               []frontend.Mora
+	loadedProsody       *prosody.Model
+	synthesisPlan       *plan.Plan
+	pitchCurve          *render.PitchCurve
+	automaticPitchCurve *render.PitchCurve
+	applyPitch          bool
+	intonationStrength  float64
+}
+
+// prepareSpeechはSynthesizeWithOptionsのレンダリング前までを実行する。
+// 設定はここで解決・補完されるため、呼び出し側は返されたcfgを使う。
+func prepareSpeech(cfg Config) (*speechPreparation, error) {
 	bank := cfg.Voicebank
 	var err error
 	if bank == nil {
@@ -493,47 +564,19 @@ func SynthesizeWithOptions(cfg Config, providerOptions render.ProviderOptions) (
 		pitchCurve = render.ConstrainPitchCurve(pitchCurve, 20, 8)
 	}
 	intonationStrength := rendererIntonationStrength(cfg, automaticPitchCurve)
-	providerOptions.Worldline.SpeechPitchReference = experimentalSpeechPitch(cfg) && applyPitch
-	rendered, err := render.RenderWithReport(synthesisPlan, render.Config{
-		Context:                 cfg.Context,
-		Engine:                  cfg.Engine,
-		ReleaseMS:               cfg.ReleaseMS,
-		ReleaseSet:              cfg.ReleaseSet,
-		LeadingPreutteranceMS:   cfg.LeadingPreutteranceMS,
-		IntonationStrength:      intonationStrength,
-		ApplyPitch:              applyPitch,
-		Backend:                 cfg.Renderer,
-		ProviderOptions:         providerOptions,
-		BoundaryBridgeMS:        cfg.BoundaryBridgeMS,
-		BoundaryBridgeThreshold: cfg.BoundaryBridgeThreshold,
-		CVVCTiming:              cfg.CVVCTiming,
-		CVVCTransitionGain:      cfg.CVVCTransitionGain,
-		CVVCPreBoundaryFade:     cfg.CVVCPreBoundaryFade,
-		PitchCurve:              pitchCurve,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("render: %w", err)
-	}
-	pcm := rendered.Audio
-	timings := moraTimings(morae, synthesisPlan)
-	moraDurations := make([]float64, len(timings))
-	moraPositions := make([]float64, len(timings))
-	pitchPoints := make([]float64, len(timings))
-	for index, timing := range timings {
-		moraDurations[index] = timing.DurationMS
-		moraPositions[index] = timing.StartMS + timing.DurationMS/2
-		if automaticPitchCurve != nil && !morae[index].Pause {
-			pitchPoints[index] = pitchCurveCentsAt(automaticPitchCurve, moraPositions[index])
-		}
-	}
-	return &Result{
-		Voicebank:       bank,
-		Plan:            synthesisPlan,
-		Audio:           pcm,
-		RenderReport:    &rendered.Report,
-		MoraDurationsMS: moraDurations,
-		MoraPositionsMS: moraPositions,
-		PitchPoints:     pitchPoints,
+	return &speechPreparation{
+		cfg:                 cfg,
+		bank:                bank,
+		language:            language,
+		phonemizer:          phonemizer,
+		reading:             reading,
+		morae:               morae,
+		loadedProsody:       loadedProsody,
+		synthesisPlan:       synthesisPlan,
+		pitchCurve:          pitchCurve,
+		automaticPitchCurve: automaticPitchCurve,
+		applyPitch:          applyPitch,
+		intonationStrength:  intonationStrength,
 	}, nil
 }
 

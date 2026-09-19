@@ -309,7 +309,59 @@ if (audio) {
 
 ---
 
-### 6. .koe アーカイブ形式
+### 6. UtauTTS 読み上げ (日本語 TTS)
+
+[UtauTTS](https://github.com/onjmin/UtauTTS) の前半（読み・アクセント解析 → ユニット選択 → 時間計画 → TCN イントネーション → worldline 配置）を Wasm で実行し、波形は `Worldline` で合成する。必要なアセットは 3 つで、いずれも DEMO と同じ配置で配信する（`dist/utautts/` にも同梱）:
+
+| アセット | サイズ | 役割 |
+|---|---|---|
+| `utautts/utautts.wasm` + `wasm_exec.js` | 約 10MB (gzip 3.5MB) | UtauTTS プランナー (Go) |
+| `utautts/jpreprocess_wasm/` + `naist-jdic/*.gz` | 1.4MB + 約 29MB | OpenJTalk 互換の読み・アクセント解析と辞書 |
+| `utautts/frame-intonation-v8.json` | 1MB | TCN イントネーションモデル |
+
+```ts
+import {
+  VoiceBank, Worldline, UtauTTSAdapter, openjtalkAnalyze,
+  fetchAsset, fetchAssetText, loadNaistJdic, initJpreprocessDictionary,
+} from "@onjmin/koe";
+import initJpreprocess, * as jpreprocess from "./utautts/jpreprocess_wasm/jpreprocess_wasm.js";
+// <script src="./utautts/wasm_exec.js"></script> を先に読み込んでおく
+
+// 初回のみ。fetchAsset は Cache API に保存するので 2 回目以降はネットワークを使わない。
+await initJpreprocess({ module_or_path: fetchAsset("./utautts/jpreprocess_wasm/jpreprocess_wasm_bg.wasm") });
+initJpreprocessDictionary(jpreprocess, await loadNaistJdic("./utautts/jpreprocess_wasm/naist-jdic"));
+await UtauTTSAdapter.initializeWasm("./utautts/utautts.wasm", { fetch: fetchAsset });
+UtauTTSAdapter.setModel(await fetchAssetText("./utautts/frame-intonation-v8.json"));
+
+const bank = await VoiceBank.load("/voice.koe");
+const wl = await Worldline.load({ scriptUrl: "./world/worldline.js" });
+const tts = new UtauTTSAdapter(wl);
+
+const text = "こんにちは、私の名前はテトです。";
+const { features } = openjtalkAnalyze(JSON.parse(jpreprocess.analyze_text(text)));
+const plan = tts.plan(bank, text, features);            // 選択・タイミング・F0 曲線・worldline 配置
+
+// チャンクごとに合成 → 届いた順にスケジュールすると数モーラ分で再生が始まる
+const ctx = new AudioContext({ sampleRate: 48000 });
+const t0 = ctx.currentTime + 0.1;
+for await (const chunk of tts.renderChunks(bank, plan)) {
+  const buf = ctx.createBuffer(1, chunk.pcm.length, 48000);
+  buf.copyToChannel(chunk.pcm, 0);
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(ctx.destination);
+  src.start(t0 + chunk.startMs / 1000);   // 重なる部分は等パワーのクロスフェード済み
+}
+
+// 一括で 1 本の Float32Array が欲しいとき
+const pcm = await tts.synthesizeText(bank, text, features);
+```
+
+`plan()` のオプション（`tone`, `moraDurationMs`, `pauseDurationMs`, `releaseMs`, `applyPitch`, `intonationStrength`, `speechTiming`）は `utautts-cli` と同じ意味・既定値。ピッチの基準は各音素の収録ピッチ（manifest の `pitch`）で、TCN の輪郭はそこからの相対値として掛かる。
+
+---
+
+### 7. .koe アーカイブ形式
 
 ```
 [4B] magic 'KOE\0' (big-endian)
@@ -341,6 +393,9 @@ const pcmOffset = pcmBase(jsonLength); // PCM データの開始バイト位置
 | `KoeEngine` | AudioWorklet ベースの連接合成エンジン |
 | `VoiceBank` | .koe から音素 PCM をオンデマンド取得 |
 | `Worldline` | WORLD ボコーダによる高品質ノート合成 |
+| `UtauTTSAdapter` | UtauTTS プランナー (Wasm) + worldline による日本語読み上げ。`plan` / `renderChunks` / `synthesizeText` |
+| `openjtalkAnalyze`, `sparse_features`, `readingFromFeatures` | jpreprocess の NJD 出力 → モーラ特徴量・読み |
+| `fetchAsset`, `loadNaistJdic`, `initJpreprocessDictionary` | Cache API 付きアセット取得と naist-jdic 辞書の読み込み |
 | `generateOto` | wav 群 → oto.ini エントリを推定 (原音設定) |
 | `generateOtoForFile` | wav 1本ぶんの推定 (進捗表示したいとき用) |
 | `formatOto` / `encodeOto` | エントリ → oto.ini テキスト / Shift-JIS バイト列 |

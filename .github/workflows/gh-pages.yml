@@ -44,7 +44,7 @@ jobs:
         working-directory: src/utautts/go-src/UtauTTS
         run: |
           mkdir -p "$GITHUB_WORKSPACE/demo/utautts"
-          GOOS=js GOARCH=wasm go build -o "$GITHUB_WORKSPACE/demo/utautts/utautts.wasm" ./cmd/utautts-wasm
+          GOOS=js GOARCH=wasm go build -trimpath -ldflags="-s -w" -o "$GITHUB_WORKSPACE/demo/utautts/utautts.wasm" ./cmd/utautts-wasm
           # Go 1.24+ ships wasm_exec.js under lib/wasm; earlier versions use misc/wasm.
           goroot="$(go env GOROOT)"
           if [ -f "$goroot/lib/wasm/wasm_exec.js" ]; then
@@ -68,12 +68,25 @@ jobs:
         with:
           tool: wasm-bindgen-cli@0.2.128
 
-      - name: Build jpreprocess WASM
+      - name: Build jpreprocess WASM + naist-jdic dictionary
         working-directory: src/jpreprocess-wasm
         run: |
-          cargo build --target wasm32-unknown-unknown --release
-          wasm-bindgen target/wasm32-unknown-unknown/release/jpreprocess_wasm.wasm \
-            --out-dir "$GITHUB_WORKSPACE/demo/utautts/jpreprocess_wasm" --target web
+          set -e
+          target=wasm32-unknown-unknown
+          out="$GITHUB_WORKSPACE/demo/utautts/jpreprocess_wasm"
+          # 1) `cargo check` with the bundled-dict feature runs jpreprocess-naist-jdic's
+          #    build.rs, which downloads the prebuilt dictionary into target/.
+          cargo check --release --target "$target" --features bundled-dict
+          dict_dir="$(find "target/$target/release/build" -type d -path '*jpreprocess-naist-jdic-*/out/naist-jdic' | head -n 1)"
+          test -f "$dict_dir/dict.da" || { echo "::error::naist-jdic dictionary not found under target/"; exit 1; }
+          mkdir -p "$out/naist-jdic"
+          for f in metadata.json char_def.bin matrix.mtx dict.da dict.vals unk.bin dict.wordsidx dict.words; do
+            gzip -9 -c "$dict_dir/$f" > "$out/naist-jdic/$f.gz"
+          done
+          # 2) the dictionary-free wasm (~1.4MB) + JS glue
+          cargo build --release --target "$target"
+          wasm-bindgen "target/$target/release/jpreprocess_wasm.wasm" --out-dir "$out" --target web
+          du -sh "$out" "$out/naist-jdic"
 
       - name: Build docs
         run: pnpm exec rimraf docs && pnpm exec typedoc src/index.ts --out docs
@@ -103,7 +116,10 @@ jobs:
             docs/demo/utautts/wasm_exec.js \
             docs/demo/utautts/frame-intonation-v8.json \
             docs/demo/utautts/jpreprocess_wasm/jpreprocess_wasm.js \
-            docs/demo/utautts/jpreprocess_wasm/jpreprocess_wasm_bg.wasm ; do
+            docs/demo/utautts/jpreprocess_wasm/jpreprocess_wasm_bg.wasm \
+            docs/demo/utautts/jpreprocess_wasm/naist-jdic/dict.da.gz \
+            docs/demo/utautts/jpreprocess_wasm/naist-jdic/dict.words.gz \
+            docs/demo/utautts/jpreprocess_wasm/naist-jdic/matrix.mtx.gz ; do
             test -s "$f" || { echo "::error::missing or empty demo asset: $f"; exit 1; }
           done
           du -sh docs docs/demo/utautts

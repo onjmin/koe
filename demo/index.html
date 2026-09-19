@@ -394,7 +394,7 @@
       <!-- TTS synthesis -->
       <div class="sub">
         <h3>④ UtauTTS 読み上げ</h3>
-        <p class="hint">日本語のテキストを入力して、UtauTTSのAI（TCNモデル）によるWorldline合成を試します。</p>
+        <p class="hint">日本語のテキストを入力して、UtauTTS の読み上げ（TCN イントネーションモデル + worldline 合成）を試します。必要なアセット（辞書など約 45MB）は音源読み込み後にバックグラウンドで取得し、ブラウザにキャッシュされます。</p>
         <div class="field">
           <input type="text" id="ttsText" class="grow" placeholder="こんにちは、私の名前はkoeです。" style="padding: 6px; font-family: 'DotGothic16', monospace; background: var(--panel2); color: var(--ink); border: var(--px) solid var(--line);" />
         </div>
@@ -441,10 +441,13 @@
       packKoe, KoeEngine, Worldline, leadInFromEntry,
       unzipToFileMap, zipFiles,
       generateOtoForFile, summarise, suffixFromFolderName, encodeOto,
-      UtauTTSAdapter, openjtalkAnalyze, sparse_features
+      UtauTTSAdapter, openjtalkAnalyze,
+      fetchAsset, fetchAssetText, loadNaistJdic, initJpreprocessDictionary
     } from './index.js';
-    
-    import initJpreprocess, { analyze_text } from './utautts/jpreprocess_wasm/jpreprocess_wasm.js';
+
+    // jpreprocess (OpenJTalk-compatible text analysis). The wasm is ~1.4MB; its
+    // naist-jdic dictionary (~29MB gzipped) is fetched separately by warmTts().
+    import initJpreprocess, * as jpreprocess from './utautts/jpreprocess_wasm/jpreprocess_wasm.js';
 
     // ── state ──
     let convertedKoe = null;     // Blob
@@ -833,6 +836,8 @@
         appendLog(logEl, `✓ ${allNames.length} 音素 (オンデマンド)`);
         setupPlayback(allNames);
         enable($('stepPlay'));
+        // Start fetching the TTS assets now so ④ responds instantly later.
+        warmTts().catch(err => console.warn('[tts] warm-up failed:', err));
       } catch (err) {
         const detail = [err?.name, err?.message].filter(Boolean).join(' | ');
         appendLog(logEl, `✗ ${detail}`);
@@ -867,6 +872,7 @@
       wlAbort = true;
       wlSources.forEach(s => { try { s.stop(); } catch {} });
       wlSources = [];
+      stopTts();
     });
 
     function setupPlayback(names) {
@@ -1237,13 +1243,59 @@
       }
     });
 
+    // ── ④ UtauTTS 読み上げ ──
     const ttsPlayBtn = $('ttsPlayBtn');
     const ttsStatus = $('ttsStatus');
     const ttsProgress = $('ttsProgress');
     const ttsText = $('ttsText');
+    const TTS_BASE = './utautts/';
 
-    // The 80MB jpreprocess dictionary is fetched on first use, not at page load.
-    let jpreprocessInitialized = false;
+    // The heavy assets (jpreprocess wasm + naist-jdic dictionary, UtauTTS wasm,
+    // TCN model) are fetched once, stored in the Cache API, and warmed up in the
+    // background as soon as a bank is loaded. warmTts() resolves to the adapter.
+    let ttsWarm = null;
+    let ttsSources = [];
+    let ttsAbort = null;
+
+    function stopTts() {
+      ttsAbort?.abort();
+      ttsSources.forEach(s => { try { s.stop(); } catch {} });
+      ttsSources = [];
+    }
+
+    function warmTts() {
+      if (ttsWarm) return ttsWarm;
+      const progress = new Map(); // url → { loaded, total }
+      const onProgress = (p) => {
+        progress.set(p.url, p);
+        let loaded = 0, total = 0;
+        for (const item of progress.values()) { loaded += item.loaded; total += item.total; }
+        setProgress(ttsProgress, total ? loaded / total : 0);
+        setLog(ttsStatus, `TTS アセット取得中… ${(loaded / 1048576).toFixed(1)} / ${(total / 1048576).toFixed(1)} MB`);
+      };
+      ttsWarm = (async () => {
+        const worldlineReady = wl ? Promise.resolve(wl) : Worldline.load({ scriptUrl: './world/worldline.js' }).then(w => (wl = w));
+        const jpreprocessReady = (async () => {
+          await initJpreprocess({ module_or_path: fetchAsset(TTS_BASE + 'jpreprocess_wasm/jpreprocess_wasm_bg.wasm', { onProgress }) });
+          if (!jpreprocess.is_ready()) {
+            const dict = await loadNaistJdic(TTS_BASE + 'jpreprocess_wasm/naist-jdic', { onProgress });
+            initJpreprocessDictionary(jpreprocess, dict);
+          }
+        })();
+        const utauttsReady = (async () => {
+          await UtauTTSAdapter.initializeWasm(TTS_BASE + 'utautts.wasm', { fetch: url => fetchAsset(url, { onProgress }) });
+          UtauTTSAdapter.setModel(await fetchAssetText(TTS_BASE + 'frame-intonation-v8.json', { onProgress }));
+        })();
+        const [worldline] = await Promise.all([worldlineReady, jpreprocessReady, utauttsReady]);
+        setProgress(ttsProgress, 1);
+        setLog(ttsStatus, '✓ TTS 準備完了');
+        return new UtauTTSAdapter(worldline);
+      })();
+      ttsWarm.catch(() => { ttsWarm = null; });
+      return ttsWarm;
+    }
+
+    ttsText.addEventListener('focus', () => { if (engine) warmTts().catch(() => {}); });
 
     ttsPlayBtn.addEventListener('click', async () => {
       if (!engine || !currentManifest) {
@@ -1251,55 +1303,58 @@
         return;
       }
       const text = ttsText.value.trim() || ttsText.placeholder;
-      
+      stopTts();
+      const abort = new AbortController();
+      ttsAbort = abort;
       ttsPlayBtn.disabled = true;
       setProgress(ttsProgress, 0);
-      setLog(ttsStatus, 'Wasm モジュール読み込み中…');
-      
+
       try {
-        if (!wl) wl = await Worldline.load({ scriptUrl: './world/worldline.js' });
-        
-        setLog(ttsStatus, 'JPreprocess 初期化中...');
-        if (!jpreprocessInitialized) {
-          await initJpreprocess('./utautts/jpreprocess_wasm/jpreprocess_wasm_bg.wasm');
-          jpreprocessInitialized = true;
+        const adapter = await warmTts();
+        await engine.resume();
+        const t0 = performance.now();
+
+        setLog(ttsStatus, '形態素解析中…');
+        const nodes = JSON.parse(jpreprocess.analyze_text(text));
+        const { reading, features } = openjtalkAnalyze(nodes);
+
+        setLog(ttsStatus, 'UtauTTS 推論中…');
+        const plan = adapter.plan(engine.voiceBank, text, features, { tone: 'C4' });
+        const planMs = performance.now() - t0;
+        console.log('[tts] plan', plan);
+
+        // Streaming playback: every chunk is scheduled on the AudioContext as soon
+        // as worldline renders it, so the first morae start after ~1 chunk.
+        const audioCtx = engine.audioContext;
+        const FS = 48000;
+        let anchor = null;   // AudioContext time that corresponds to timeline 0
+        let chunks = 0, firstAudioMs = 0;
+        const totalMs = plan.timeline.duration_ms;
+        for await (const chunk of adapter.renderChunks(engine.voiceBank, plan, { signal: abort.signal })) {
+          const now = audioCtx.currentTime;
+          if (anchor === null) {
+            anchor = now + 0.08 - chunk.startMs / 1000;
+            firstAudioMs = performance.now() - t0;
+          }
+          let startAt = anchor + chunk.startMs / 1000;
+          if (startAt < now + 0.005) {
+            // Rendering fell behind playback: shift the rest of the timeline.
+            anchor += (now + 0.02) - startAt;
+            startAt = now + 0.02;
+          }
+          const ab = audioCtx.createBuffer(1, chunk.pcm.length, FS);
+          ab.getChannelData(0).set(chunk.pcm);
+          const src = audioCtx.createBufferSource();
+          src.buffer = ab;
+          src.connect(audioCtx.destination);
+          src.start(startAt);
+          ttsSources.push(src);
+          chunks++;
+          setProgress(ttsProgress, Math.min(1, (chunk.startMs + (chunk.pcm.length / FS) * 1000) / totalMs));
+          setLog(ttsStatus, `合成しながら再生中… ${chunks} chunk — ${reading}`);
         }
-
-        setLog(ttsStatus, 'UtauTTS 初期化中...');
-        await UtauTTSAdapter.initializeWasm('./utautts/utautts.wasm');
-        
-        let tcnModel = "";
-        try {
-            const res = await fetch('./utautts/frame-intonation-v8.json');
-            tcnModel = await res.text();
-        } catch (e) {
-            console.warn("Could not fetch TCN model for UtauTTS.", e);
-        }
-
-        setLog(ttsStatus, '形態素解析中...');
-        const njdJson = analyze_text(text);
-        const njdNodes = JSON.parse(njdJson);
-        
-        // openjtalk_features.ts から import した関数で特徴量にパース
-        const { reading, features: tokenFeatures } = openjtalkAnalyze(njdNodes);
-        const frameFeatures = tokenFeatures.map(f => sparse_features(f));
-
-        setLog(ttsStatus, 'UtauTTS推論中...');
-        const adapter = new UtauTTSAdapter(wl);
-        const pcm = await adapter.synthesizeText(engine.voiceBank, text, "C4", tcnModel, frameFeatures);
-        
-        if (pcm) {
-            setLog(ttsStatus, '再生中…');
-            const audioCtx = engine.audioContext;
-            const ab = audioCtx.createBuffer(1, pcm.length, audioCtx.sampleRate);
-            ab.getChannelData(0).set(pcm);
-            const src = audioCtx.createBufferSource();
-            src.buffer = ab;
-            src.connect(audioCtx.destination);
-            src.start();
-            setLog(ttsStatus, '✓ TTS 合成・再生完了');
-        } else {
-            setLog(ttsStatus, '✗ 合成に失敗しました');
+        if (!abort.signal.aborted) {
+          setLog(ttsStatus, `✓ ${reading}  (plan ${planMs.toFixed(0)} ms / 初回音声 ${firstAudioMs.toFixed(0)} ms / ${chunks} chunks / ${(totalMs / 1000).toFixed(2)} s)`);
         }
       } catch (err) {
         setLog(ttsStatus, `✗ ${err.message}`);

@@ -19,6 +19,8 @@ export default defineConfig([
     async onSuccess() {
       mkdirSync('dist/world', { recursive: true });
       cpSync('demo/world', 'dist/world', { recursive: true });
+      mkdirSync('dist/utautts', { recursive: true });
+      cpSync('demo/utautts', 'dist/utautts', { recursive: true });
     },
   },
   // AudioWorklet processor — IIFE, no imports, runs in audio thread

@@ -432,7 +432,7 @@
   </script>
   
   <!-- Go Wasm runtime -->
-  <script src="/wasm_exec.js"></script>
+  <script src="./utautts/wasm_exec.js"></script>
 
   <script type="module">
     import {
@@ -1255,7 +1255,7 @@
         if (!wl) wl = await Worldline.load({ scriptUrl: './world/worldline.js' });
         
         setLog(ttsStatus, 'UtauTTS推論中…');
-        await UtauTTSAdapter.initializeWasm('/utautts.wasm');
+        await UtauTTSAdapter.initializeWasm('./utautts/utautts.wasm');
         
         const adapter = new UtauTTSAdapter(wl);
         const pcm = await adapter.synthesizeText(engine.voiceBank, text);

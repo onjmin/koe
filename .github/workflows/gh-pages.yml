@@ -49,6 +49,9 @@ jobs:
           cp dist/koe-worklet.js docs/demo/koe-worklet.js
           cp dist/world/worldline.js docs/demo/world/worldline.js
           cp dist/world/worldline.wasm docs/demo/world/worldline.wasm
+          mkdir -p docs/demo/utautts
+          cp dist/utautts/wasm_exec.js docs/demo/utautts/wasm_exec.js
+          cp dist/utautts/utautts.wasm docs/demo/utautts/utautts.wasm
 
       - name: Add .nojekyll
         run: touch ./docs/.nojekyll

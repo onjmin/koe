@@ -1257,8 +1257,16 @@
         setLog(ttsStatus, 'UtauTTS推論中…');
         await UtauTTSAdapter.initializeWasm('./utautts/utautts.wasm');
         
+        let tcnModel = "";
+        try {
+            const res = await fetch('./utautts/frame-intonation-v8.json');
+            tcnModel = await res.text();
+        } catch (e) {
+            console.warn("TCN model not found", e);
+        }
+
         const adapter = new UtauTTSAdapter(wl);
-        const pcm = await adapter.synthesizeText(engine.voiceBank, text);
+        const pcm = await adapter.synthesizeText(engine.voiceBank, text, "C4", tcnModel);
         
         if (pcm) {
             setLog(ttsStatus, '再生中…');

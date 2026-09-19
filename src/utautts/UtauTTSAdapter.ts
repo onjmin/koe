@@ -98,7 +98,7 @@ export class UtauTTSAdapter {
     /**
      * 指定したテキストを合成するための Plan (発話計画) と音声を生成します。
      */
-    public async synthesizeText(bank: VoiceBank, text: string, tone: string = "C4"): Promise<Float32Array | null> {
+    public async synthesizeText(bank: VoiceBank, text: string, tone: string = "C4", modelJSON: string = ""): Promise<Float32Array | null> {
         // 1. VoiceBankのマニフェストをWasmが解釈できる形式に変換
         const otoEntries = this.buildOtoEntriesFromKoe(bank);
 
@@ -107,7 +107,8 @@ export class UtauTTSAdapter {
             text: text,
             oto_entries: otoEntries,
             tone: tone,
-            duration_ms: 0 // UtauTTS側に自動計算させる
+            duration_ms: 0, // UtauTTS側に自動計算させる
+            model_json: modelJSON
         };
 
         const response = utautts_plan(JSON.stringify(request));

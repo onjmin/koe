@@ -204,6 +204,32 @@ interface ChunkRange {
 }
 
 /**
+ * Scale each timeline unit's volume by the gain of the mora it belongs to
+ * (`HtsProsody.moraGains`, one entry per feature frame / plan mora). Units are
+ * matched by their mora index when the counts agree, else by start time.
+ */
+function applyMoraGains(plan: UtauTTSPlan, gains: number[]): void {
+	const morae = plan.morae ?? [];
+	const timings = plan.mora_timings ?? [];
+	const byIndex = morae.length === gains.length;
+	const moraAt = (unit: UtauTTSTimelineUnit): number => {
+		if (byIndex) return unit.position;
+		let found = -1;
+		for (let i = 0; i < timings.length && i < gains.length; i++) {
+			if (timings[i].StartMS <= unit.note_start_ms + 1e-6) found = i;
+			else break;
+		}
+		return found;
+	};
+	for (const unit of plan.timeline.units) {
+		const index = moraAt(unit);
+		const gain = gains[index];
+		if (index < 0 || gain === undefined || !Number.isFinite(gain)) continue;
+		unit.volume *= gain;
+	}
+}
+
+/**
  * Split timeline units into chunks. Breaks are free where units do not overlap
  * (pauses); inside a phrase a break every N units costs one seam crossfade.
  */
@@ -429,7 +455,10 @@ export class UtauTTSAdapter {
 		if (!response.success || !response.plan) {
 			throw new Error(`UtauTTS error: ${response.error ?? "no plan"}`);
 		}
-		return JSON.parse(response.plan) as UtauTTSPlan;
+		const plan = JSON.parse(response.plan) as UtauTTSPlan;
+		const gains = options.prosody?.moraGains;
+		if (gains) applyMoraGains(plan, gains);
+		return plan;
 	}
 
 	private getPcm(bank: VoiceBank, alias: string): Promise<Float64Array | null> {

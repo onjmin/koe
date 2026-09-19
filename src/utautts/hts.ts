@@ -34,6 +34,16 @@ export interface HtsProsody {
 	medianHz: number;
 	/** Total planned duration in ms (sum of `moraDurationsMs`). */
 	durationMs: number;
+	/**
+	 * Per feature-frame flag: HTS predicted the mora nucleus as a devoiced vowel
+	 * (Open JTalk's upper-case `I`/`U`, e.g. the "su" in "desu"). Pauses are false.
+	 */
+	devoiced: boolean[];
+	/**
+	 * Optional per feature-frame linear gain (1 = unity) applied to the units of
+	 * that mora on top of UtauTTS's own volume; filled by `shapeProsody`.
+	 */
+	moraGains?: number[];
 }
 
 export interface AlignHtsOptions {
@@ -81,7 +91,11 @@ interface Segment {
 	pause: boolean;
 	startMs: number;
 	durationMs: number;
+	/** Nucleus was an upper-case (devoiced) vowel. */
+	devoiced: boolean;
 }
+
+const DEVOICED = new Set(["A", "I", "U", "E", "O"]);
 
 /** Group HTS phonemes into morae / pauses. Leading `sil` is dropped, trailing `sil` becomes a pause. */
 function segmentPhonemes(phonemes: HtsPhoneme[]): Segment[] {
@@ -96,6 +110,7 @@ function segmentPhonemes(phonemes: HtsPhoneme[]): Segment[] {
 					pause: false,
 					startMs: openStart,
 					durationMs: start_ms - openStart,
+					devoiced: false,
 				});
 				openStart = null;
 			}
@@ -104,6 +119,7 @@ function segmentPhonemes(phonemes: HtsPhoneme[]): Segment[] {
 				pause: true,
 				startMs: start_ms,
 				durationMs: duration_ms,
+				devoiced: false,
 			});
 			continue;
 		}
@@ -113,6 +129,7 @@ function segmentPhonemes(phonemes: HtsPhoneme[]): Segment[] {
 				pause: false,
 				startMs: openStart,
 				durationMs: start_ms + duration_ms - openStart,
+				devoiced: DEVOICED.has(phone),
 			});
 			openStart = null;
 		}
@@ -123,6 +140,7 @@ function segmentPhonemes(phonemes: HtsPhoneme[]): Segment[] {
 			pause: false,
 			startMs: openStart,
 			durationMs: last.start_ms + last.duration_ms - openStart,
+			devoiced: false,
 		});
 	}
 	return segments;
@@ -150,6 +168,7 @@ export function alignHtsProsody(
 	// Two-pointer walk: morae must pair 1:1; pauses may be missing on either side.
 	const durations: number[] = new Array(features.length).fill(0);
 	const htsStart: (number | null)[] = new Array(features.length).fill(null);
+	const devoiced: boolean[] = new Array(features.length).fill(false);
 	let s = 0;
 	for (let f = 0; f < features.length; f++) {
 		const feature = features[f];
@@ -168,6 +187,7 @@ export function alignHtsProsody(
 		if (!segment) return null;
 		durations[f] = segment.durationMs;
 		htsStart[f] = segment.startMs;
+		devoiced[f] = segment.devoiced;
 		s++;
 	}
 	if (segments.slice(s).some((segment) => !segment.pause)) return null; // HTS has morae left over
@@ -237,5 +257,6 @@ export function alignHtsProsody(
 		pitchCurve: { frame_ms: frameMs, cents },
 		medianHz,
 		durationMs,
+		devoiced,
 	};
 }

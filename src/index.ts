@@ -111,6 +111,8 @@ export {
 	analyze as openjtalkAnalyze,
 	sparse_features,
 } from "./utautts/openjtalk_features.js";
+export type { ShapeProsodyOptions } from "./utautts/prosody_rules.js";
+export { isQuestion, shapeProsody } from "./utautts/prosody_rules.js";
 export type {
 	UtauTTSChunk,
 	UtauTTSOptions,

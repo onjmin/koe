@@ -175,11 +175,17 @@ struct Prosody {
 
 /// テキストから HTS が生成する音素長と F0 曲線を取り出す (JSON 文字列)。
 /// `speed` は話速 (1.0 が標準、大きいほど速い)。波形は生成しない。
+/// `gv_weight` は F0 の GV (global variance) 重み。省略時は音声モデルの既定値
+/// (hts_engine と同じ 1.0)。大きいほど音高の山谷が強調され、0 で GV 無効。
 ///
 /// 出力: `{frame_ms, sample_rate, phonemes: [{phone, start_ms, duration_ms}], f0_hz: [...]}`。
 /// 先頭と末尾の `sil`、句読点の `pau` も音素として含む。
 #[wasm_bindgen]
-pub fn analyze_prosody(text: &str, speed: f64) -> Result<String, JsError> {
+pub fn analyze_prosody(
+    text: &str,
+    speed: f64,
+    gv_weight: Option<f64>,
+) -> Result<String, JsError> {
     let label_strings = extract_fullcontext(text)?;
     VOICE.with(|slot| {
         let slot = slot.borrow();
@@ -199,9 +205,12 @@ pub fn analyze_prosody(text: &str, speed: f64) -> Result<String, JsError> {
         let nstate = models.nstate();
         let speed = if speed.is_finite() && speed > 0.0 { speed } else { 1.0 };
         let durations = DurationEstimator::new(models.duration(), nstate).create(speed);
-        // stream 1 = 対数 F0 (MSD)。GV と無声判定は合成時と同じ設定を使う。
+        // stream 1 = 対数 F0 (MSD)。無声判定は合成時と同じ設定、GV 重みは引数で上書き可。
+        let gv_weight = gv_weight
+            .filter(|w| w.is_finite() && *w >= 0.0)
+            .unwrap_or_else(|| condition.get_gv_weight(1));
         let lf0 = MlpgAdjust::new(
-            condition.get_gv_weight(1),
+            gv_weight,
             condition.get_msd_threshold(1),
             models.model_stream(1),
         )

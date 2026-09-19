@@ -142,3 +142,10 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# WASM binaries
+demo/utautts/jpreprocess_wasm/
+demo/utautts/utautts.wasm
+demo/utautts/wasm_exec.js
+src/jpreprocess-wasm/target/
+src/utautts/jpreprocess_wasm/

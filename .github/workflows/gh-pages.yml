@@ -35,6 +35,46 @@ jobs:
       - name: Install dependencies
         run: pnpm install
 
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: src/utautts/go-src/UtauTTS/go.mod
+
+      - name: Build UtauTTS WASM
+        working-directory: src/utautts/go-src/UtauTTS
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/demo/utautts"
+          GOOS=js GOARCH=wasm go build -o "$GITHUB_WORKSPACE/demo/utautts/utautts.wasm" ./cmd/utautts-wasm
+          # Go 1.24+ ships wasm_exec.js under lib/wasm; earlier versions use misc/wasm.
+          goroot="$(go env GOROOT)"
+          if [ -f "$goroot/lib/wasm/wasm_exec.js" ]; then
+            cp "$goroot/lib/wasm/wasm_exec.js" "$GITHUB_WORKSPACE/demo/utautts/wasm_exec.js"
+          else
+            cp "$goroot/misc/wasm/wasm_exec.js" "$GITHUB_WORKSPACE/demo/utautts/wasm_exec.js"
+          fi
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/jpreprocess-wasm
+
+      - name: Install wasm-bindgen-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.128
+
+      - name: Build jpreprocess WASM
+        working-directory: src/jpreprocess-wasm
+        run: |
+          cargo build --target wasm32-unknown-unknown --release
+          wasm-bindgen target/wasm32-unknown-unknown/release/jpreprocess_wasm.wasm \
+            --out-dir "$GITHUB_WORKSPACE/demo/utautts/jpreprocess_wasm" --target web
+
       - name: Build docs
         run: pnpm exec rimraf docs && pnpm exec typedoc src/index.ts --out docs
 
@@ -47,11 +87,26 @@ jobs:
           cp demo/index.html docs/demo/index.html
           cp dist/index.js docs/demo/index.js
           cp dist/koe-worklet.js docs/demo/koe-worklet.js
-          cp dist/world/worldline.js docs/demo/world/worldline.js
-          cp dist/world/worldline.wasm docs/demo/world/worldline.wasm
+          cp -r dist/world/* docs/demo/world/
           mkdir -p docs/demo/utautts
-          cp dist/utautts/wasm_exec.js docs/demo/utautts/wasm_exec.js
-          cp dist/utautts/utautts.wasm docs/demo/utautts/utautts.wasm
+          cp -r dist/utautts/* docs/demo/utautts/
+
+      - name: Verify demo assets
+        run: |
+          set -e
+          for f in \
+            docs/demo/index.html \
+            docs/demo/index.js \
+            docs/demo/koe-worklet.js \
+            docs/demo/world/worldline.wasm \
+            docs/demo/utautts/utautts.wasm \
+            docs/demo/utautts/wasm_exec.js \
+            docs/demo/utautts/frame-intonation-v8.json \
+            docs/demo/utautts/jpreprocess_wasm/jpreprocess_wasm.js \
+            docs/demo/utautts/jpreprocess_wasm/jpreprocess_wasm_bg.wasm ; do
+            test -s "$f" || { echo "::error::missing or empty demo asset: $f"; exit 1; }
+          done
+          du -sh docs docs/demo/utautts
 
       - name: Add .nojekyll
         run: touch ./docs/.nojekyll

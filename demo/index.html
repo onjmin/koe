@@ -441,8 +441,10 @@
       packKoe, KoeEngine, Worldline, leadInFromEntry,
       unzipToFileMap, zipFiles,
       generateOtoForFile, summarise, suffixFromFolderName, encodeOto,
-      UtauTTSAdapter
+      UtauTTSAdapter, openjtalkAnalyze, sparse_features
     } from './index.js';
+    
+    import initJpreprocess, { analyze_text } from './utautts/jpreprocess_wasm/jpreprocess_wasm.js';
 
     // ── state ──
     let convertedKoe = null;     // Blob
@@ -1254,7 +1256,13 @@
       try {
         if (!wl) wl = await Worldline.load({ scriptUrl: './world/worldline.js' });
         
-        setLog(ttsStatus, 'UtauTTS推論中…');
+        setLog(ttsStatus, 'JPreprocess 初期化中...');
+        if (!jpreprocessInitialized) {
+          await initJpreprocess('./utautts/jpreprocess_wasm/jpreprocess_wasm_bg.wasm');
+          jpreprocessInitialized = true;
+        }
+
+        setLog(ttsStatus, 'UtauTTS 初期化中...');
         await UtauTTSAdapter.initializeWasm('./utautts/utautts.wasm');
         
         let tcnModel = "";
@@ -1262,11 +1270,20 @@
             const res = await fetch('./utautts/frame-intonation-v8.json');
             tcnModel = await res.text();
         } catch (e) {
-            console.warn("TCN model not found", e);
+            console.warn("Could not fetch TCN model for UtauTTS.", e);
         }
 
+        setLog(ttsStatus, '形態素解析中...');
+        const njdJson = analyze_text(text);
+        const njdNodes = JSON.parse(njdJson);
+        
+        // openjtalk_features.ts から import した関数で特徴量にパース
+        const { reading, features: tokenFeatures } = openjtalkAnalyze(njdNodes);
+        const frameFeatures = tokenFeatures.map(f => sparse_features(f));
+
+        setLog(ttsStatus, 'UtauTTS推論中...');
         const adapter = new UtauTTSAdapter(wl);
-        const pcm = await adapter.synthesizeText(engine.voiceBank, text, "C4", tcnModel);
+        const pcm = await adapter.synthesizeText(engine.voiceBank, text, "C4", tcnModel, frameFeatures);
         
         if (pcm) {
             setLog(ttsStatus, '再生中…');

@@ -89,3 +89,5 @@ export type { Manifest, PhonemeEntry } from "./types.js";
 // TTS integration
 export { UtauTTSAdapter } from "./utautts/UtauTTSAdapter.js";
 export type { UtauTTSPlan, UtauTTSUnit } from "./utautts/UtauTTSAdapter.js";
+
+export { analyze as openjtalkAnalyze, sparse_features, FeatureFrame, NjdNode } from './utautts/openjtalk_features.js';

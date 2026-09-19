@@ -16,6 +16,7 @@ import (
 type WasmRequest struct {
 	Text        string                     `json:"text"`
 	Morae       []frontend.Mora            `json:"morae,omitempty"` // Option to bypass OpenJTalk
+	Frames      []prosody.FeatureFrame     `json:"frames,omitempty"`
 	OtoEntries  map[string][]oto.Entry     `json:"oto_entries"`
 	ModelJSON   string                     `json:"model_json,omitempty"`
 	Tone        string                     `json:"tone"`
@@ -101,7 +102,12 @@ func utauttsPlan(this js.Value, args []js.Value) any {
 		for i := range timings {
 			timings[i] = prosody.MoraTiming{StartMS: float64(i) * 100, DurationMS: 100}
 		}
-		var frames []prosody.FeatureFrame // empty for now
+		
+		frames := req.Frames
+		if frames == nil {
+			frames = make([]prosody.FeatureFrame, 0)
+		}
+		
 		duration := req.DurationMS
 		if duration == 0 {
 			duration = float64(len(morae)) * 100

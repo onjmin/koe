@@ -629,3 +629,93 @@ func writeResolverTone(t *testing.T, path string, hz float64) {
 		t.Fatal(err)
 	}
 }
+
+func TestAliasCandidatesAfterClosureOfferVCVForms(t *testing.T) {
+	tierOf := func(candidates []aliasCandidate, name string) (int, bool) {
+		for _, candidate := range candidates {
+			if candidate.name == name {
+				return candidate.tier, true
+			}
+		}
+		return 0, false
+	}
+	candidates := aliasCandidatesAfterContext("か", "cl", "a", false, AliasPolicyAuto)
+	if _, ok := tierOf(candidates, "cl か"); ok {
+		t.Fatal("closure was incorrectly used as a VCV context")
+	}
+	cv, ok := tierOf(candidates, "か")
+	if !ok {
+		t.Fatal("CV candidate missing")
+	}
+	initial, ok := tierOf(candidates, "- か")
+	if !ok {
+		t.Fatal("post-closure initial VCV candidate was not generated")
+	}
+	carried, ok := tierOf(candidates, "a か")
+	if !ok {
+		t.Fatal("post-closure carried-vowel VCV candidate was not generated")
+	}
+	if !(cv < initial && initial < carried) {
+		t.Fatalf("tiers: か=%d - か=%d a か=%d (want CV first)", cv, initial, carried)
+	}
+	// 促音の前の母音が無いときは語頭形だけ。
+	if _, ok := tierOf(aliasCandidatesAfterContext("か", "cl", "", false, AliasPolicyAuto), " か"); ok {
+		t.Fatal("empty closure vowel produced a malformed candidate")
+	}
+	// 単独音のみの方針では足さない。
+	if _, ok := tierOf(aliasCandidatesAfterContext("か", "cl", "a", false, AliasPolicyCVOnly), "- か"); ok {
+		t.Fatal("cv-only policy offered a VCV candidate")
+	}
+}
+
+func TestResolveVCVOnlyBankAfterClosure(t *testing.T) {
+	// 連続音しか持たない音源（つくよみちゃん等）で「あっか」が引けること。
+	cases := []struct {
+		name    string
+		entries map[string][]oto.Entry
+		want    string
+	}{
+		{
+			name: "initial form preferred",
+			entries: map[string][]oto.Entry{
+				"- あ": {{Alias: "- あ", Filename: "a.wav"}},
+				"- か": {{Alias: "- か", Filename: "ka0.wav"}},
+				"a か": {{Alias: "a か", Filename: "aka.wav"}},
+			},
+			want: "- か",
+		},
+		{
+			name: "carried vowel when no initial form",
+			entries: map[string][]oto.Entry{
+				"- あ": {{Alias: "- あ", Filename: "a.wav"}},
+				"a か": {{Alias: "a か", Filename: "aka.wav"}},
+			},
+			want: "a か",
+		},
+		{
+			name: "cv still wins when present",
+			entries: map[string][]oto.Entry{
+				"- あ": {{Alias: "- あ", Filename: "a.wav"}},
+				"か":   {{Alias: "か", Filename: "ka.wav"}},
+				"- か": {{Alias: "- か", Filename: "ka0.wav"}},
+			},
+			want: "か",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bank := &Bank{Entries: tc.entries}
+			morae, err := frontend.ParseKana("あっか")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := bank.Resolve(morae)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 3 || got[2].Alias != tc.want {
+				t.Fatalf("selections=%#v", got)
+			}
+		})
+	}
+}

@@ -135,18 +135,32 @@ func (b *Bank) candidateLayersDiagnostic(morae []frontend.Mora, tone, color stri
 		return nil, fmt.Errorf("voicebank color %q has no subbank for tone %q", color, tone)
 	}
 	previousVowel := ""
+	// 直前が促音（previousVowel == "cl"）のとき、その促音の前にあった母音。
+	// 連続音しか持たない音源で促音の直後を「- か」「a か」として引くために持ち越す。
+	closureVowel := ""
+	advanceVowel := func(vowel string) {
+		if vowel == "cl" {
+			if previousVowel != "cl" {
+				closureVowel = previousVowel
+			}
+		} else {
+			closureVowel = ""
+		}
+		previousVowel = vowel
+	}
 	phraseStart := true
 	var previousLayer []Selection
 	for position, mora := range morae {
 		if mora.Pause {
 			layers = append(layers, nil)
 			previousVowel = ""
+			closureVowel = ""
 			phraseStart = true
 			previousLayer = nil
 			continue
 		}
 
-		candidateSpecs := aliasCandidatesWithPolicy(mora.Text, previousVowel, phraseStart, policy)
+		candidateSpecs := aliasCandidatesAfterContext(mora.Text, previousVowel, closureVowel, phraseStart, policy)
 		consonant := mora.Consonant
 		if consonant == "" {
 			consonant = frontend.ConsonantOf(mora.Text)
@@ -322,7 +336,7 @@ func (b *Bank) candidateLayersDiagnostic(morae []frontend.Mora, tone, color stri
 				}}
 				layers = append(layers, candidatesAtPosition)
 				previousLayer = candidatesAtPosition
-				previousVowel = mora.Vowel
+				advanceVowel(mora.Vowel)
 				phraseStart = false
 				continue
 			}
@@ -333,7 +347,7 @@ func (b *Bank) candidateLayersDiagnostic(morae []frontend.Mora, tone, color stri
 			*missing = append(*missing, failure)
 			layers = append(layers, nil)
 			previousLayer = nil
-			previousVowel = mora.Vowel
+			advanceVowel(mora.Vowel)
 			phraseStart = false
 			continue
 		}
@@ -519,6 +533,14 @@ type aliasForm struct {
 }
 
 func aliasCandidatesWithPolicy(mora, previousVowel string, phraseStart bool, policy AliasPolicy) []aliasCandidate {
+	return aliasCandidatesAfterContext(mora, previousVowel, "", phraseStart, policy)
+}
+
+// aliasCandidatesAfterContextは直前の文脈つきで候補を作る。closureVowelは直前が促音のとき
+// その促音の前にあった母音（無ければ空）。促音の直後は閉鎖（無音）のあとに子音が立つので、
+// 連続音しか持たない音源では語頭形「- か」、次いで促音前の母音の連続音「a か」で引く。
+// どちらも単独音「か」より後ろの優先度に置き、単独音を持つ音源の選択は変えない。
+func aliasCandidatesAfterContext(mora, previousVowel, closureVowel string, phraseStart bool, policy AliasPolicy) []aliasCandidate {
 	forms := make([]aliasForm, 0, 4)
 	if mora == "ー" {
 		if vowelKana := map[string]string{"a": "あ", "i": "い", "u": "う", "e": "え", "o": "お"}[previousVowel]; vowelKana != "" {
@@ -554,6 +576,18 @@ func aliasCandidatesWithPolicy(mora, previousVowel string, phraseStart bool, pol
 	if policy != AliasPolicyCVOnly && !phraseStart {
 		for _, form := range forms {
 			candidates = append(candidates, aliasCandidate{name: "* " + form.text, tier: policyTier(policy, 2, AliasCV) + form.fallback, kind: AliasCV, equivalent: form.equivalent})
+		}
+	}
+	// 促音の直後: 「cl か」は録音として存在しないので、閉鎖の無音に続く語頭形「- か」と、
+	// 促音前の母音の連続音「a か」を単独音より後ろの優先度で足す（連続音のみの音源の救済）。
+	if policy != AliasPolicyCVOnly && allowVCVTarget && !phraseStart && previousVowel == "cl" {
+		for _, form := range forms {
+			candidates = append(candidates, aliasCandidate{name: "- " + form.text, tier: policyTier(policy, 2, AliasVCV) + form.fallback, kind: AliasVCV, equivalent: form.equivalent})
+		}
+		if closureVowel != "" && closureVowel != "cl" {
+			for _, form := range forms {
+				candidates = append(candidates, aliasCandidate{name: closureVowel + " " + form.text, tier: policyTier(policy, 3, AliasVCV) + form.fallback, kind: AliasVCV, equivalent: form.equivalent})
+			}
 		}
 	}
 	return uniqueCandidates(candidates)

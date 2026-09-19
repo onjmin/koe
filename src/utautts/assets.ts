@@ -27,6 +27,12 @@ export interface AssetFetchOptions {
 	cacheName?: string | null;
 	onProgress?: (progress: AssetProgress) => void;
 	signal?: AbortSignal;
+	/**
+	 * Check the cached copy against the server with a HEAD request (ETag,
+	 * Last-Modified or Content-Length) so a redeployed asset is refetched.
+	 * Offline or on error the cached copy is used. Default true.
+	 */
+	revalidate?: boolean;
 }
 
 const DEFAULT_CACHE = "koe-tts-assets-v1";
@@ -45,6 +51,30 @@ async function openCache(
 }
 
 /**
+ * HEAD the asset and compare validators with the cached copy. Network errors
+ * (offline) count as "current" so the cache keeps working without a server.
+ */
+async function cachedCopyIsCurrent(
+	url: string,
+	cached: Response,
+	signal?: AbortSignal,
+): Promise<boolean> {
+	let head: Response;
+	try {
+		head = await fetch(url, { method: "HEAD", signal, cache: "no-cache" });
+	} catch {
+		return true;
+	}
+	if (!head.ok) return true;
+	for (const name of ["etag", "last-modified", "content-length"]) {
+		const remote = head.headers.get(name);
+		const local = cached.headers.get(name);
+		if (remote && local) return remote === local;
+	}
+	return true;
+}
+
+/**
  * Fetch a static asset with download progress, backed by the Cache API.
  *
  * The returned Response has a fully buffered body, so it can be handed to
@@ -54,12 +84,15 @@ export async function fetchAsset(
 	url: string,
 	options: AssetFetchOptions = {},
 ): Promise<Response> {
-	const { onProgress, signal } = options;
+	const { onProgress, signal, revalidate = true } = options;
 	const cache = await openCache(options.cacheName);
 	if (cache) {
 		try {
 			const hit = await cache.match(url);
-			if (hit) {
+			if (
+				hit &&
+				(!revalidate || (await cachedCopyIsCurrent(url, hit, signal)))
+			) {
 				const total = Number(hit.headers.get("content-length")) || 0;
 				onProgress?.({ url, loaded: total, total, fromCache: true });
 				return hit;
@@ -104,8 +137,10 @@ export async function fetchAsset(
 	}
 
 	const headers = new Headers();
-	const type = response.headers.get("content-type");
-	if (type) headers.set("content-type", type);
+	for (const name of ["content-type", "etag", "last-modified"]) {
+		const value = response.headers.get(name);
+		if (value) headers.set(name, value);
+	}
 	headers.set("content-length", String(body.byteLength));
 	const buffered = new Response(body, { status: 200, headers });
 	if (cache) {
@@ -164,6 +199,11 @@ export interface JpreprocessModule {
 	): void;
 	analyze_text(text: string): string;
 	is_ready(): boolean;
+	/** Load an HTS voice (.htsvoice bytes) for `analyze_prosody`. */
+	init_voice?(htsvoice: Uint8Array): void;
+	is_voice_ready?(): boolean;
+	/** HTS phoneme durations + F0 for the text (JSON, see `HtsProsodyFrames`). */
+	analyze_prosody?(text: string, speed: number): string;
 }
 
 async function inflate(bytes: Uint8Array): Promise<Uint8Array> {

@@ -99,6 +99,13 @@ export {
 	loadNaistJdic,
 	NAIST_JDIC_FILES,
 } from "./utautts/assets.js";
+export type {
+	AlignHtsOptions,
+	HtsPhoneme,
+	HtsProsody,
+	HtsProsodyFrames,
+} from "./utautts/hts.js";
+export { alignHtsProsody } from "./utautts/hts.js";
 export type { FeatureFrame, NjdNode } from "./utautts/openjtalk_features.js";
 export {
 	analyze as openjtalkAnalyze,

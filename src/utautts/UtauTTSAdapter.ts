@@ -5,6 +5,7 @@ import {
 	WORLDLINE_SAMPLE_RATE,
 	type Worldline,
 } from "../engine/worldline.js";
+import type { HtsProsody } from "./hts.js";
 import { type FeatureFrame, sparse_features } from "./openjtalk_features.js";
 
 // ── Plan JSON produced by cmd/utautts-wasm ──────────────────────────────────
@@ -134,6 +135,12 @@ export interface UtauTTSOptions {
 	/** UtauTTS experimental speech timing (voicebank calibration). Default false. */
 	speechTiming?: boolean;
 	wordBoundaryEnvelope?: boolean;
+	/**
+	 * External prosody (mora durations + cents curve) from `alignHtsProsody`.
+	 * When set, UtauTTS uses these instead of its own durations and TCN contour;
+	 * `intonationStrength` is applied by `alignHtsProsody`, not here.
+	 */
+	prosody?: HtsProsody;
 }
 
 /** One rendered piece of audio. Sum overlapping chunks: seams are equal-power crossfades. */
@@ -415,6 +422,8 @@ export class UtauTTSAdapter {
 			intonation_strength: options.intonationStrength ?? 1,
 			speech_timing: options.speechTiming ?? false,
 			word_boundary_envelope: options.wordBoundaryEnvelope ?? false,
+			mora_durations_ms: options.prosody?.moraDurationsMs,
+			pitch_curve: options.prosody?.pitchCurve,
 		};
 		const response = utautts_plan(JSON.stringify(request));
 		if (!response.success || !response.plan) {

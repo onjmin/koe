@@ -11,6 +11,7 @@
 //
 //	text, reading, frames(モーラ特徴), tone, mora_duration_ms, pause_duration_ms, release_ms,
 //	leading_preutterance_ms, apply_pitch, intonation_strength, speech_timing,
+//	mora_durations_ms / pitch_curve (HTS等の外部韻律を移植するとき),
 //	oto_entries / source_pitch_hz / model_json (省略時はset_bank/set_modelの値を使う)
 package main
 
@@ -49,6 +50,10 @@ type planRequest struct {
 	IntonationStrength    *float64               `json:"intonation_strength,omitempty"`
 	SpeechTiming          bool                   `json:"speech_timing,omitempty"`
 	WordBoundaryEnvelope  bool                   `json:"word_boundary_envelope,omitempty"`
+	// 外部韻律(HTS等)の移植用。MoraDurationsMSはモーラ(ポーズ含む)ごとの長さ、
+	// PitchCurveは計画時刻基準のcents曲線。指定するとTCNの輪郭は使わない。
+	MoraDurationsMS []float64          `json:"mora_durations_ms,omitempty"`
+	PitchCurve      *render.PitchCurve `json:"pitch_curve,omitempty"`
 	// 互換: 1回のリクエストで音源とモデルを渡す旧形式。
 	OtoEntries    map[string][]oto.Entry `json:"oto_entries,omitempty"`
 	SourcePitchHz map[string]float64     `json:"source_pitch_hz,omitempty"`
@@ -210,6 +215,8 @@ func utauttsPlan(this js.Value, args []js.Value) any {
 		IntonationStrength:    intonationStrength,
 		SpeechTiming:          req.SpeechTiming,
 		WordBoundaryEnvelope:  req.WordBoundaryEnvelope,
+		MoraDurationsMS:       req.MoraDurationsMS,
+		PitchCurve:            req.PitchCurve,
 		Renderer:              "worldline",
 		RendererCapabilities:  &plugin.Capabilities{FramePitch: true},
 		AliasPolicy:           voicebank.AliasPolicyAuto,

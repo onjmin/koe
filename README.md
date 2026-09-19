@@ -318,11 +318,12 @@ if (audio) {
 | `utautts/utautts.wasm` + `wasm_exec.js` | 約 10MB (gzip 3.5MB) | UtauTTS プランナー (Go) |
 | `utautts/jpreprocess_wasm/` + `naist-jdic/*.gz` | 1.4MB + 約 29MB | OpenJTalk 互換の読み・アクセント解析と辞書 |
 | `utautts/frame-intonation-v8.json` | 1MB | TCN イントネーションモデル |
+| `utautts/hts/tohoku-f01-neutral.htsvoice` | 2MB | HTS 音声モデル（東北大学 伊藤・能勢研究室 tohoku-f01, CC BY 4.0）。音素長と F0 だけを取り出して UTAU 音源に移植する |
 
 ```ts
 import {
-  VoiceBank, Worldline, UtauTTSAdapter, openjtalkAnalyze,
-  fetchAsset, fetchAssetText, loadNaistJdic, initJpreprocessDictionary,
+  VoiceBank, Worldline, UtauTTSAdapter, openjtalkAnalyze, alignHtsProsody,
+  fetchAsset, fetchAssetBytes, fetchAssetText, loadNaistJdic, initJpreprocessDictionary,
 } from "@onjmin/koe";
 import initJpreprocess, * as jpreprocess from "./utautts/jpreprocess_wasm/jpreprocess_wasm.js";
 // <script src="./utautts/wasm_exec.js"></script> を先に読み込んでおく
@@ -339,7 +340,13 @@ const tts = new UtauTTSAdapter(wl);
 
 const text = "こんにちは、私の名前はテトです。";
 const { features } = openjtalkAnalyze(JSON.parse(jpreprocess.analyze_text(text)));
-const plan = tts.plan(bank, text, features);            // 選択・タイミング・F0 曲線・worldline 配置
+
+// 韻律は 2 通り。HTS 音声モデルの音素長と F0 を移植する（推奨、アクセントの起伏が大きい）か、
+// UtauTTS の TCN モデルに任せる（prosody を渡さない）。
+jpreprocess.init_voice(await fetchAssetBytes("./utautts/hts/tohoku-f01-neutral.htsvoice"));
+const frames = JSON.parse(jpreprocess.analyze_prosody(text, 1.0));   // 音素ごとの長さ + 5ms 刻みの F0
+const prosody = alignHtsProsody(frames, features, { intonationStrength: 1 }); // モーラに整列（失敗時 null）
+const plan = tts.plan(bank, text, features, { prosody: prosody ?? undefined }); // 選択・タイミング・F0 曲線・worldline 配置
 
 // チャンクごとに合成 → 届いた順にスケジュールすると数モーラ分で再生が始まる
 const ctx = new AudioContext({ sampleRate: 48000 });

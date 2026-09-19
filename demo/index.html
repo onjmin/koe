@@ -394,9 +394,19 @@
       <!-- TTS synthesis -->
       <div class="sub">
         <h3>④ UtauTTS 読み上げ</h3>
-        <p class="hint">日本語のテキストを入力して、UtauTTS の読み上げ（TCN イントネーションモデル + worldline 合成）を試します。必要なアセット（辞書など約 45MB）は音源読み込み後にバックグラウンドで取得し、ブラウザにキャッシュされます。</p>
+        <p class="hint">日本語のテキストを入力して、UtauTTS の読み上げ（worldline 合成）を試します。韻律は HTS 音声モデル（東北大学 伊藤・能勢研究室 tohoku-f01, CC BY 4.0）の音素長と F0 を UTAU 音源に移植するか、UtauTTS の TCN モデルを選べます。必要なアセット（辞書など約 47MB）は音源読み込み後にバックグラウンドで取得し、ブラウザにキャッシュされます。</p>
         <div class="field">
           <input type="text" id="ttsText" class="grow" placeholder="こんにちは、私の名前はkoeです。" style="padding: 6px; font-family: 'DotGothic16', monospace; background: var(--panel2); color: var(--ink); border: var(--px) solid var(--line);" />
+        </div>
+        <div class="field">
+          <label for="ttsProsody">韻律</label>
+          <select id="ttsProsody">
+            <option value="hts" selected>HTS (tohoku-f01) の音素長と F0 を移植</option>
+            <option value="tcn">UtauTTS TCN v8</option>
+          </select>
+          <label for="ttsStrength">抑揚</label>
+          <input type="range" id="ttsStrength" min="0" max="4" step="0.1" value="1" />
+          <span id="ttsStrengthVal">×1.0</span>
         </div>
         <button class="btn blue" id="ttsPlayBtn">♪ TTS 読み上げ</button>
         <div class="progress"><div class="progress-bar" id="ttsProgress"></div></div>
@@ -441,8 +451,8 @@
       packKoe, KoeEngine, Worldline, leadInFromEntry,
       unzipToFileMap, zipFiles,
       generateOtoForFile, summarise, suffixFromFolderName, encodeOto,
-      UtauTTSAdapter, openjtalkAnalyze,
-      fetchAsset, fetchAssetText, loadNaistJdic, initJpreprocessDictionary
+      UtauTTSAdapter, openjtalkAnalyze, alignHtsProsody,
+      fetchAsset, fetchAssetText, fetchAssetBytes, loadNaistJdic, initJpreprocessDictionary
     } from './index.js';
 
     // jpreprocess (OpenJTalk-compatible text analysis). The wasm is ~1.4MB; its
@@ -1286,7 +1296,9 @@
           await UtauTTSAdapter.initializeWasm(TTS_BASE + 'utautts.wasm', { fetch: url => fetchAsset(url, { onProgress }) });
           UtauTTSAdapter.setModel(await fetchAssetText(TTS_BASE + 'frame-intonation-v8.json', { onProgress }));
         })();
-        const [worldline] = await Promise.all([worldlineReady, jpreprocessReady, utauttsReady]);
+        const htsVoiceReady = fetchAssetBytes(TTS_BASE + 'hts/tohoku-f01-neutral.htsvoice', { onProgress });
+        const [worldline, , , htsVoice] = await Promise.all([worldlineReady, jpreprocessReady, utauttsReady, htsVoiceReady]);
+        if (!jpreprocess.is_voice_ready()) jpreprocess.init_voice(htsVoice);
         setProgress(ttsProgress, 1);
         setLog(ttsStatus, '✓ TTS 準備完了');
         return new UtauTTSAdapter(worldline);
@@ -1296,6 +1308,9 @@
     }
 
     ttsText.addEventListener('focus', () => { if (engine) warmTts().catch(() => {}); });
+    const ttsProsody = $('ttsProsody');
+    const ttsStrength = $('ttsStrength');
+    ttsStrength.addEventListener('input', () => { $('ttsStrengthVal').textContent = '×' + Number(ttsStrength.value).toFixed(1); });
 
     ttsPlayBtn.addEventListener('click', async () => {
       if (!engine || !currentManifest) {
@@ -1319,7 +1334,16 @@
         const { reading, features } = openjtalkAnalyze(nodes);
 
         setLog(ttsStatus, 'UtauTTS 推論中…');
-        const plan = adapter.plan(engine.voiceBank, text, features, { tone: 'C4' });
+        const intonationStrength = Number(ttsStrength.value);
+        let prosody = null;
+        if (ttsProsody.value === 'hts') {
+          // HTS (jbonsai) decides mora lengths + F0; UtauTTS keeps unit selection and placement.
+          const frames = JSON.parse(jpreprocess.analyze_prosody(text, 1.0));
+          prosody = alignHtsProsody(frames, features, { intonationStrength });
+          if (!prosody) console.warn('[tts] HTS prosody could not be aligned to the morae; falling back to TCN');
+          else console.log('[tts] hts prosody', prosody, frames);
+        }
+        const plan = adapter.plan(engine.voiceBank, text, features, { tone: 'C4', intonationStrength, prosody: prosody ?? undefined });
         const planMs = performance.now() - t0;
         console.log('[tts] plan', plan);
 

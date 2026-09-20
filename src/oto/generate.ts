@@ -175,27 +175,36 @@ export function generateOtoForFile(
 	file: WavInput,
 	options: GenerateOptions = {},
 ): FileResult {
-	const prepared = prepareFile(file);
+	const prepared = prepareOtoFile(file);
 	return "skipped" in prepared
 		? prepared.skipped
-		: estimateFile(prepared, options);
+		: estimateOtoFile(prepared, options);
 }
 
 /** A decoded, analysed recording, ready to be estimated (again, if need be). */
-interface PreparedFile {
+export interface PreparedFile {
 	name: string;
 	frames: Frames;
 	transcript: Transcript;
 }
 
+/** What {@link prepareOtoFile} returns for a file that cannot be set up. */
+export interface SkippedPrepared {
+	skipped: FileResult;
+}
+
 /**
  * Decode and analyse one file. The analysis is the expensive half of the
  * work and does not depend on any option, so a folder pass keeps it and only
- * re-runs {@link estimateFile} when a file has to be refitted.
+ * re-runs {@link estimateOtoFile} when a file has to be refitted.
+ *
+ * A caller that drives a folder itself — to yield to the UI between files —
+ * goes prepare → estimate per file, then hands everything to
+ * {@link finishOto}; that last step is where the folder-wide work lives
+ * (tempo refit, one `a R` per vowel, `を` from `お`), and skipping it is what
+ * a per-file loop over {@link generateOtoForFile} silently does.
  */
-function prepareFile(
-	file: WavInput,
-): PreparedFile | { skipped: FileResult } {
+export function prepareOtoFile(file: WavInput): PreparedFile | SkippedPrepared {
 	const skip = (reason: string): { skipped: FileResult } => ({
 		skipped: {
 			entries: [],
@@ -219,9 +228,10 @@ function prepareFile(
 	return { name: file.name, frames, transcript };
 }
 
-function estimateFile(
+/** Estimate one prepared file. See {@link prepareOtoFile}. */
+export function estimateOtoFile(
 	prepared: PreparedFile,
-	options: GenerateOptions,
+	options: GenerateOptions = {},
 ): FileResult {
 	const suffix = options.suffix ?? "";
 	const headAliases = options.headAliases ?? true;
@@ -362,19 +372,39 @@ export function generateOto(
 	files: readonly WavInput[],
 	options: GenerateOptions = {},
 ): GenerateResult {
-	const prepared = files.map((file) => prepareFile(file));
+	const prepared = files.map((file) => prepareOtoFile(file));
 	const results = prepared.map((p) =>
-		"skipped" in p ? p.skipped : estimateFile(p, options),
+		"skipped" in p ? p.skipped : estimateOtoFile(p, options),
 	);
+	return finishOto(prepared, results, options);
+}
+
+/**
+ * Fold per-file results into the folder's oto.ini. `prepared[i]` and
+ * `results[i]` describe the same file, in the order they were run.
+ *
+ * Three things only make sense with the whole folder in view: refitting the
+ * files whose tempo disagrees with the rest, keeping one `a R` per vowel, and
+ * copying お to を when を was never recorded.
+ */
+export function finishOto(
+	prepared: readonly (PreparedFile | SkippedPrepared)[],
+	results: readonly FileResult[],
+	options: GenerateOptions = {},
+): GenerateResult {
+	if (prepared.length !== results.length) {
+		throw new Error("finishOto: prepared and results must line up");
+	}
+	const refitted = [...results];
 
 	// A 連続音 list is sung to one guide tempo, so the files agree on their mora
 	// interval — except the few whose onsets are too weak to measure. Those get
 	// refitted around the folder's tempo instead of a sub-multiple of it.
 	if (options.intervalHintMs === undefined) {
-		const folderMs = medianInterval(results.map((r) => r.intervalMs));
+		const folderMs = medianInterval(refitted.map((r) => r.intervalMs));
 		if (folderMs > 0) {
-			for (let i = 0; i < files.length; i++) {
-				const r = results[i];
+			for (let i = 0; i < refitted.length; i++) {
+				const r = refitted[i];
 				const p = prepared[i];
 				if (r.style !== "sequence" || "skipped" in p) continue;
 				const ratio = r.intervalMs / folderMs;
@@ -382,7 +412,7 @@ export function generateOto(
 					ratio < 1 / INTERVAL_OUTLIER_RATIO ||
 					ratio > INTERVAL_OUTLIER_RATIO
 				) {
-					results[i] = estimateFile(p, {
+					refitted[i] = estimateOtoFile(p, {
 						...options,
 						intervalHintMs: folderMs,
 					});
@@ -397,13 +427,14 @@ export function generateOto(
 	let solo = 0;
 	let sequence = 0;
 
-	for (let i = 0; i < files.length; i++) {
-		const result = results[i];
+	for (let i = 0; i < refitted.length; i++) {
+		const result = refitted[i];
+		const p = prepared[i];
 		entries.push(...result.entries);
 		if (result.skipped) skipped.push(result.skipped);
 		if (result.style === "solo") solo++;
 		if (result.style === "sequence") sequence++;
-		if (result.explicitRest) explicitRestWavs.add(files[i].name);
+		if (result.explicitRest && !("skipped" in p)) explicitRestWavs.add(p.name);
 	}
 
 	if (options.restAliases ?? true) {

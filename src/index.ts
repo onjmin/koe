@@ -69,12 +69,17 @@ export type {
 	FileResult,
 	GenerateOptions,
 	GenerateResult,
+	PreparedFile,
 	SkippedFile,
+	SkippedPrepared,
 	WavInput,
 } from "./oto/generate.js";
 export {
 	generateOto,
 	generateOtoForFile,
+	prepareOtoFile,
+	estimateOtoFile,
+	finishOto,
 	suffixFromFolderName,
 	summarise,
 	transcribe,

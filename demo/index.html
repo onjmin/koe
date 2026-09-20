@@ -466,7 +466,7 @@
       parseFrqAverageF0, frqFileName, pitchFromAliasSuffix,
       packKoe, KoeEngine, Worldline, leadInFromEntry,
       unzipToFileMap, zipFiles,
-      generateOtoForFile, summarise, suffixFromFolderName, encodeOto,
+      prepareOtoFile, estimateOtoFile, finishOto, suffixFromFolderName, encodeOto,
       UtauTTSAdapter, openjtalkAnalyze, alignHtsProsody, shapeProsody, isQuestion,
       resolveSpeakingStyle, styleAlignOptions, styleShapeOptions, styleRenderOptions,
       fetchAsset, fetchAssetText, fetchAssetBytes, loadNaistJdic, initJpreprocessDictionary
@@ -610,17 +610,20 @@
       for (const [dir, paths] of [...byDir].sort((a, b) => a[0].localeCompare(b[0], 'ja'))) {
         const folderName = dir.slice(dir.lastIndexOf('/') + 1);
         const suffix = manual || suffixFromFolderName(folderName);
-        const entries = [];
-        let skipped = 0, solo = 0, sequence = 0;
+        const folderOptions = { ...options, suffix };
+        // Per file: analyse, estimate, yield. The folder-wide steps (tempo
+        // refit, one `a R` per vowel, を from お) live in finishOto — a loop
+        // that only calls generateOtoForFile skips them and ships a worse
+        // oto.ini than the CLI would.
+        const prepared = [];
+        const results = [];
 
         for (const path of paths.sort((a, b) => a.localeCompare(b, 'ja'))) {
           const name = path.slice(path.lastIndexOf('/') + 1);
           const data = await fileMap[path].arrayBuffer();
-          const r = generateOtoForFile({ name, data }, { ...options, suffix });
-          entries.push(...r.entries);
-          if (r.skipped) skipped++;
-          if (r.style === 'solo') solo++;
-          if (r.style === 'sequence') sequence++;
+          const p = prepareOtoFile({ name, data });
+          prepared.push(p);
+          results.push('skipped' in p ? p.skipped : estimateOtoFile(p, folderOptions));
 
           done++;
           setProgress(otoProgress, done / total);
@@ -631,12 +634,13 @@
           await yieldToUi();
         }
 
+        const { entries, skipped: skippedFiles, style } = finishOto(prepared, results, folderOptions);
         if (!entries.length) {
           appendLog(otoLog, `[skip] ${dir || topDir}: 仮名として読めるファイルがありません`);
           continue;
         }
         const bytes = encodeOto(entries);
-        folders.push({ dir, bytes, entries: entries.length, skipped, style: summarise(solo, sequence) });
+        folders.push({ dir, bytes, entries: entries.length, skipped: skippedFiles.length, style });
         // Put the result back into the map so 変換 can pick it up unchanged.
         fileMap[(dir ? dir + '/' : '') + 'oto.ini'] = {
           arrayBuffer: () => Promise.resolve(bytes.slice().buffer),

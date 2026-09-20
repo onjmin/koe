@@ -139,15 +139,21 @@ console.log(formatOto(entries));  // oto.ini のテキスト
 const bytes = encodeOto(entries); // Shift-JIS の Uint8Array
 ```
 
-`generateOto` は同期処理なので、フォルダが大きいとブラウザのUIが固まる。進捗を出したい場合は1ファイルずつ回す:
+`generateOto` は同期処理なので、フォルダが大きいとブラウザのUIが固まる。進捗を出したい場合は1ファイルずつ回し、最後に `finishOto` へ渡す。`finishOto` がフォルダ単位の処理（拍間隔の当て直し・`a R` の整理・`を` の複製）を担うので、`generateOtoForFile` を回すだけでは CLI より劣る oto.ini になる:
 
 ```ts
-import { generateOtoForFile, summarise } from "@onjmin/koe";
+import { prepareOtoFile, estimateOtoFile, finishOto } from "@onjmin/koe";
 
+const options = { suffix: "_G4" };
+const prepared = [];
+const results = [];
 for (const file of files) {
-  const { entries, skipped, style } = generateOtoForFile(file, { suffix: "_G4" });
-  // …集計して、ここでイベントループに制御を返す
+  const p = prepareOtoFile(file);                 // 解析（重い）
+  prepared.push(p);
+  results.push("skipped" in p ? p.skipped : estimateOtoFile(p, options));
+  // …ここでイベントループに制御を返す
 }
+const { entries, skipped, style } = finishOto(prepared, results, options);
 ```
 
 `generateOto` が返す `entries` は `parseOto` と同じ `OtoEntry[]` なので、そのまま `pack()` に渡して `.koe` 化できる。

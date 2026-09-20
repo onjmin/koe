@@ -175,16 +175,35 @@ export function generateOtoForFile(
 	file: WavInput,
 	options: GenerateOptions = {},
 ): FileResult {
-	const suffix = options.suffix ?? "";
-	const headAliases = options.headAliases ?? true;
-	const vowelJoinAliases = options.vowelJoinAliases ?? true;
+	const prepared = prepareFile(file);
+	return "skipped" in prepared
+		? prepared.skipped
+		: estimateFile(prepared, options);
+}
 
-	const skip = (reason: string): FileResult => ({
-		entries: [],
-		skipped: { wav: file.name, reason },
-		style: null,
-		intervalMs: 0,
-		explicitRest: false,
+/** A decoded, analysed recording, ready to be estimated (again, if need be). */
+interface PreparedFile {
+	name: string;
+	frames: Frames;
+	transcript: Transcript;
+}
+
+/**
+ * Decode and analyse one file. The analysis is the expensive half of the
+ * work and does not depend on any option, so a folder pass keeps it and only
+ * re-runs {@link estimateFile} when a file has to be refitted.
+ */
+function prepareFile(
+	file: WavInput,
+): PreparedFile | { skipped: FileResult } {
+	const skip = (reason: string): { skipped: FileResult } => ({
+		skipped: {
+			entries: [],
+			skipped: { wav: file.name, reason },
+			style: null,
+			intervalMs: 0,
+			explicitRest: false,
+		},
 	});
 
 	const transcript = transcribe(file.name);
@@ -197,6 +216,25 @@ export function generateOtoForFile(
 		return skip(err instanceof Error ? err.message : String(err));
 	}
 	if (frames.n < 8) return skip("too short to analyse");
+	return { name: file.name, frames, transcript };
+}
+
+function estimateFile(
+	prepared: PreparedFile,
+	options: GenerateOptions,
+): FileResult {
+	const suffix = options.suffix ?? "";
+	const headAliases = options.headAliases ?? true;
+	const vowelJoinAliases = options.vowelJoinAliases ?? true;
+	const { frames, transcript } = prepared;
+	const file = { name: prepared.name };
+	const skip = (reason: string): FileResult => ({
+		entries: [],
+		skipped: { wav: file.name, reason },
+		style: null,
+		intervalMs: 0,
+		explicitRest: false,
+	});
 
 	const { syllables, trailingRest, prefix, mark } = transcript;
 
@@ -247,8 +285,15 @@ export function generateOtoForFile(
 	};
 }
 
-/** A file's tempo this far from the folder's is a mis-fit, not a slow take. */
-const INTERVAL_OUTLIER_RATIO = 1.5;
+/**
+ * A file's tempo this far from the folder's is a mis-fit, not a slow take.
+ *
+ * Lists are sung to a click, so a genuine take is within a few percent of the
+ * folder. What lands outside is a file whose own onsets were too weak to fit:
+ * a legato vowel list whose held final vowel stretched the span by half, or a
+ * file of glides that autocorrelated at a fraction of the beat.
+ */
+const INTERVAL_OUTLIER_RATIO = 1.12;
 
 /** Median of the positive values, or 0 when there are none. */
 function medianInterval(values: readonly number[]): number {
@@ -317,7 +362,10 @@ export function generateOto(
 	files: readonly WavInput[],
 	options: GenerateOptions = {},
 ): GenerateResult {
-	const results = files.map((file) => generateOtoForFile(file, options));
+	const prepared = files.map((file) => prepareFile(file));
+	const results = prepared.map((p) =>
+		"skipped" in p ? p.skipped : estimateFile(p, options),
+	);
 
 	// A 連続音 list is sung to one guide tempo, so the files agree on their mora
 	// interval — except the few whose onsets are too weak to measure. Those get
@@ -327,13 +375,14 @@ export function generateOto(
 		if (folderMs > 0) {
 			for (let i = 0; i < files.length; i++) {
 				const r = results[i];
-				if (r.style !== "sequence") continue;
+				const p = prepared[i];
+				if (r.style !== "sequence" || "skipped" in p) continue;
 				const ratio = r.intervalMs / folderMs;
 				if (
 					ratio < 1 / INTERVAL_OUTLIER_RATIO ||
 					ratio > INTERVAL_OUTLIER_RATIO
 				) {
-					results[i] = generateOtoForFile(files[i], {
+					results[i] = estimateFile(p, {
 						...options,
 						intervalHintMs: folderMs,
 					});

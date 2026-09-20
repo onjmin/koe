@@ -10,7 +10,7 @@
 import type { OtoEntry } from "../converter/parse-oto.js";
 import { parseWav } from "../converter/wav.js";
 import {
-	estimateSequence,
+	estimateSequenceDetail,
 	estimateSolo,
 	estimateVowelJoin,
 } from "./estimate.js";
@@ -28,6 +28,23 @@ export interface GenerateOptions {
 	headAliases?: boolean;
 	/** Emit `* あ` 母音結合 aliases for vowel-only files. Default true. */
 	vowelJoinAliases?: boolean;
+	/**
+	 * Emit one `a R` … `n R` release entry per vowel from the 連続音 files, so a
+	 * note before a rest lets go the way the singer did. Default true.
+	 */
+	restAliases?: boolean;
+	/**
+	 * Copy every お entry to を when the list did not record を itself, so a
+	 * UST that spells the particle を does not fall silent. Default true.
+	 */
+	woAliases?: boolean;
+	/**
+	 * Mora interval to fit a 連続音 file around, in ms. {@link generateOto} sets
+	 * this itself for files whose own tempo estimate disagrees with the rest of
+	 * the folder; a caller driving {@link generateOtoForFile} directly can pass
+	 * the folder's tempo the same way.
+	 */
+	intervalHintMs?: number;
 }
 
 /** One file that could not be transcribed, and why. */
@@ -50,6 +67,10 @@ export interface FileResult {
 	skipped: SkippedFile | null;
 	/** Style this one file was read as, or null if it was skipped. */
 	style: "solo" | "sequence" | null;
+	/** Mora interval a 連続音 file was fitted at, in ms; 0 otherwise. */
+	intervalMs: number;
+	/** The filename carried an R/息 marker: a deliberate release take. */
+	explicitRest: boolean;
 }
 
 export interface WavInput {
@@ -158,35 +179,24 @@ export function generateOtoForFile(
 	const headAliases = options.headAliases ?? true;
 	const vowelJoinAliases = options.vowelJoinAliases ?? true;
 
+	const skip = (reason: string): FileResult => ({
+		entries: [],
+		skipped: { wav: file.name, reason },
+		style: null,
+		intervalMs: 0,
+		explicitRest: false,
+	});
+
 	const transcript = transcribe(file.name);
-	if (!transcript) {
-		return {
-			entries: [],
-			skipped: { wav: file.name, reason: "filename is not kana" },
-			style: null,
-		};
-	}
+	if (!transcript) return skip("filename is not kana");
 
 	let frames: Frames;
 	try {
 		frames = analyze(parseWav(file.data));
 	} catch (err) {
-		return {
-			entries: [],
-			skipped: {
-				wav: file.name,
-				reason: err instanceof Error ? err.message : String(err),
-			},
-			style: null,
-		};
+		return skip(err instanceof Error ? err.message : String(err));
 	}
-	if (frames.n < 8) {
-		return {
-			entries: [],
-			skipped: { wav: file.name, reason: "too short to analyse" },
-			style: null,
-		};
-	}
+	if (frames.n < 8) return skip("too short to analyse");
 
 	const { syllables, trailingRest, prefix, mark } = transcript;
 
@@ -206,22 +216,93 @@ export function generateOtoForFile(
 			const join = estimateVowelJoin(file.name, frames, syl, `* ${name}`);
 			if (join) entries.push(join);
 		}
-		return { entries, skipped: null, style: "solo" };
-	}
-
-	const entries = estimateSequence(file.name, frames, syllables, {
-		suffix: `${mark}${suffix}`,
-		prefix,
-		trailingRest,
-	});
-	if (entries.length === 0) {
 		return {
-			entries: [],
-			skipped: { wav: file.name, reason: "could not segment the phrase" },
-			style: null,
+			entries,
+			skipped: null,
+			style: "solo",
+			intervalMs: 0,
+			explicitRest: false,
 		};
 	}
-	return { entries, skipped: null, style: "sequence" };
+
+	const { entries, intervalMs } = estimateSequenceDetail(
+		file.name,
+		frames,
+		syllables,
+		{
+			suffix: `${mark}${suffix}`,
+			prefix,
+			trailingRest,
+			restAlias: options.restAliases ?? true,
+			intervalHintMs: options.intervalHintMs,
+		},
+	);
+	if (entries.length === 0) return skip("could not segment the phrase");
+	return {
+		entries,
+		skipped: null,
+		style: "sequence",
+		intervalMs,
+		explicitRest: trailingRest,
+	};
+}
+
+/** A file's tempo this far from the folder's is a mis-fit, not a slow take. */
+const INTERVAL_OUTLIER_RATIO = 1.5;
+
+/** Median of the positive values, or 0 when there are none. */
+function medianInterval(values: readonly number[]): number {
+	const sorted = values.filter((v) => v > 0).sort((a, b) => a - b);
+	return sorted.length ? sorted[sorted.length >> 1] : 0;
+}
+
+const REST_ALIAS = /^[aiueon] R/;
+
+/**
+ * Keep one `a R` per vowel. Every 連続音 file yields one, and they are all the
+ * same release; the take that was recorded *as* a release (`_ああR`) is the
+ * best source, and failing that the one with the longest tail to fade over.
+ */
+function dedupeRestAliases(
+	entries: OtoEntry[],
+	explicitRestWavs: ReadonlySet<string>,
+): OtoEntry[] {
+	const tail = (e: OtoEntry): number => -e.cutoff - e.pre;
+	const rank = (e: OtoEntry): number =>
+		(explicitRestWavs.has(e.wav) ? 1e6 : 0) + tail(e);
+	const best = new Map<string, OtoEntry>();
+	for (const e of entries) {
+		if (!REST_ALIAS.test(e.alias)) continue;
+		const cur = best.get(e.alias);
+		if (!cur || rank(e) > rank(cur)) best.set(e.alias, e);
+	}
+	return entries.filter(
+		(e) => !REST_ALIAS.test(e.alias) || best.get(e.alias) === e,
+	);
+}
+
+/** `a お_G4` → `a を_G4`; null when the alias is not a bare お. */
+function woAliasOf(alias: string): string | null {
+	const m = /^((?:- |\* |[aiueon] )?)お(?![ぁ-ぉゃゅょゎ])(.*)$/.exec(alias);
+	return m ? `${m[1]}を${m[2]}` : null;
+}
+
+/**
+ * Give を the sound of お wherever the list did not record it. Lyrics spell
+ * the particle を, and a phonemizer that finds no `a を` drops the note.
+ */
+function addWoAliases(entries: OtoEntry[]): OtoEntry[] {
+	const present = new Set(entries.map((e) => e.alias));
+	const out: OtoEntry[] = [];
+	for (const e of entries) {
+		out.push(e);
+		const wo = woAliasOf(e.alias);
+		if (wo && !present.has(wo)) {
+			present.add(wo);
+			out.push({ ...e, alias: wo });
+		}
+	}
+	return out;
 }
 
 /**
@@ -236,18 +317,50 @@ export function generateOto(
 	files: readonly WavInput[],
 	options: GenerateOptions = {},
 ): GenerateResult {
-	const entries: OtoEntry[] = [];
+	const results = files.map((file) => generateOtoForFile(file, options));
+
+	// A 連続音 list is sung to one guide tempo, so the files agree on their mora
+	// interval — except the few whose onsets are too weak to measure. Those get
+	// refitted around the folder's tempo instead of a sub-multiple of it.
+	if (options.intervalHintMs === undefined) {
+		const folderMs = medianInterval(results.map((r) => r.intervalMs));
+		if (folderMs > 0) {
+			for (let i = 0; i < files.length; i++) {
+				const r = results[i];
+				if (r.style !== "sequence") continue;
+				const ratio = r.intervalMs / folderMs;
+				if (
+					ratio < 1 / INTERVAL_OUTLIER_RATIO ||
+					ratio > INTERVAL_OUTLIER_RATIO
+				) {
+					results[i] = generateOtoForFile(files[i], {
+						...options,
+						intervalHintMs: folderMs,
+					});
+				}
+			}
+		}
+	}
+
+	let entries: OtoEntry[] = [];
 	const skipped: SkippedFile[] = [];
+	const explicitRestWavs = new Set<string>();
 	let solo = 0;
 	let sequence = 0;
 
-	for (const file of files) {
-		const result = generateOtoForFile(file, options);
+	for (let i = 0; i < files.length; i++) {
+		const result = results[i];
 		entries.push(...result.entries);
 		if (result.skipped) skipped.push(result.skipped);
 		if (result.style === "solo") solo++;
 		if (result.style === "sequence") sequence++;
+		if (result.explicitRest) explicitRestWavs.add(files[i].name);
 	}
+
+	if (options.restAliases ?? true) {
+		entries = dedupeRestAliases(entries, explicitRestWavs);
+	}
+	if (options.woAliases ?? true) entries = addWoAliases(entries);
 
 	return { entries, skipped, style: summarise(solo, sequence) };
 }

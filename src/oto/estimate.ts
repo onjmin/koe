@@ -321,6 +321,28 @@ export function findVoiceOnset(f: Frames, from: number, to: number): number {
 }
 
 /**
+ * How far ahead of the audible vowel the periodicity track reports voicing.
+ *
+ * The pitch window is 64 ms against the 32 ms FFT window and is not centred
+ * on the same instant, so it crosses {@link VOICED_THRESHOLD} while only its
+ * later half is in the vowel: measured on 響化アル, the first voiced frame sits
+ * 16–20 ms before the vowel is there. Every 先行発声 that hangs off a voicing
+ * onset — か・さ・た・は・ぱ行 and bare vowels — moves by this. The voiced
+ * classes locate their release from the same track and were tuned on it as it
+ * is, so they are left alone.
+ */
+const VOICING_LEAD_MS = 16;
+
+/**
+ * {@link findVoiceOnset}, shifted to where the vowel is actually heard. Use
+ * this wherever the result *is* the 先行発声 rather than a search anchor.
+ */
+function findVowelOnset(f: Frames, from: number, to: number): number {
+	const t = findVoiceOnset(f, from, to);
+	return t >= 0 ? Math.min(Math.max(0, to - 1), t + msToFrame(VOICING_LEAD_MS)) : -1;
+}
+
+/**
  * Where a *voiced* consonant hands over to its vowel.
  *
  * な/ま行 release into the vowel with a step up in level; ら行 flaps do the
@@ -462,8 +484,8 @@ export function locateMora(
 	// the voicing that begins anywhere before `to` is still a far better anchor
 	// than a fixed distance from an attack that may itself have been misjudged.
 	const voiceOnset = (): number => {
-		const near = findVoiceOnset(f, consStart, searchEnd);
-		return near >= 0 ? near : findVoiceOnset(f, searchEnd, to);
+		const near = findVowelOnset(f, consStart, searchEnd);
+		return near >= 0 ? near : findVowelOnset(f, searchEnd, to);
 	};
 
 	let vowelOnset: number;
@@ -687,7 +709,17 @@ function onsetStrength(f: Frames): Float32Array {
  * mora to the nearest real transition, keeps one mis-detected onset from
  * dragging the rest of the file out of alignment.
  */
-export function detectGrid(f: Frames, count: number): Grid | null {
+export function detectGrid(
+	f: Frames,
+	count: number,
+	/**
+	 * Mora interval to fit around instead of measuring one. A file of glides
+	 * (`_うぃうぉうぃううぇ`) has onsets too weak to autocorrelate, and the tempo
+	 * the rest of the folder was sung at is a far better guess than a
+	 * sub-multiple picked out of its own noise.
+	 */
+	hintFrames?: number,
+): Grid | null {
 	if (count < 1) return null;
 	const strength = onsetStrength(f);
 	const uttStart = findSoundStart(f, 0, f.n);
@@ -699,12 +731,10 @@ export function detectGrid(f: Frames, count: number): Grid | null {
 		return { start: uttStart, interval: span, onsets: [uttStart] };
 	}
 
-	const candidates = intervalCandidates(
-		strength,
-		uttStart,
-		uttEnd,
-		span / count,
-	);
+	const candidates =
+		hintFrames !== undefined && hintFrames > 0
+			? [hintFrames]
+			: intervalCandidates(strength, uttStart, uttEnd, span / count);
 	const best = { score: -Infinity, start: uttStart, interval: span / count };
 	const search = (requireFit: boolean): void => {
 		for (const candidate of candidates) {
@@ -888,7 +918,7 @@ function sequenceVowelOnset(
 	}
 	if (f.voiced[quietest] >= VOICED_THRESHOLD) return onset;
 
-	const resumed = findVoiceOnset(
+	const resumed = findVowelOnset(
 		f,
 		quietest,
 		Math.min(next, hi + msToFrame(80)),
@@ -910,10 +940,41 @@ export function estimateSequence(
 	wav: string,
 	f: Frames,
 	syllables: Syllable[],
-	opts: { suffix?: string; prefix?: string; trailingRest?: boolean } = {},
+	opts: SequenceOptions = {},
 ): OtoEntry[] {
-	const grid = detectGrid(f, syllables.length);
-	if (!grid) return [];
+	return estimateSequenceDetail(wav, f, syllables, opts).entries;
+}
+
+export interface SequenceOptions {
+	suffix?: string;
+	prefix?: string;
+	/**
+	 * The filename ended in an R/息 marker, so the file was recorded with a
+	 * deliberate release into silence. The `a R` entry is written either way;
+	 * this only says the file is the better source for it.
+	 */
+	trailingRest?: boolean;
+	/** Skip the `a R` entry. Default: write it. */
+	restAlias?: boolean;
+	/** Mora interval to fit around, in ms — see {@link detectGrid}. */
+	intervalHintMs?: number;
+}
+
+/** {@link estimateSequence}, plus the tempo the file was fitted at. */
+export function estimateSequenceDetail(
+	wav: string,
+	f: Frames,
+	syllables: Syllable[],
+	opts: SequenceOptions = {},
+): { entries: OtoEntry[]; intervalMs: number } {
+	const grid = detectGrid(
+		f,
+		syllables.length,
+		opts.intervalHintMs === undefined
+			? undefined
+			: msToFrame(opts.intervalHintMs),
+	);
+	if (!grid) return { entries: [], intervalMs: 0 };
 
 	const intervalMs = framesToMs(grid.interval);
 	// Half an interval, but never more than 250 ms — which is both what every
@@ -972,7 +1033,12 @@ export function estimateSequence(
 		});
 	}
 
-	if (opts.trailingRest && syllables.length > 0) {
+	// Every 連続音 file ends with a vowel released into silence, and that
+	// release is what a phrase-final `a R` plays. The reference banks write one
+	// from their `_ああR`-style files only because those are the takes where the
+	// singer let go cleanly; a bank recorded without them still needs the alias,
+	// or every note before a rest is chopped by the wavtool's 35 ms fade.
+	if (opts.restAlias !== false && syllables.length > 0) {
 		const last = syllables[syllables.length - 1];
 		const lastOnset = grid.onsets[syllables.length - 1];
 		const soundEnd = findSoundEnd(f, lastOnset, f.n);
@@ -993,5 +1059,5 @@ export function estimateSequence(
 		});
 	}
 
-	return entries;
+	return { entries, intervalMs };
 }

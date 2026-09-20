@@ -220,24 +220,40 @@ export function findConsonantStart(
 	from: number,
 	to: number,
 	frication: boolean,
+	maxBackMs = 150,
 ): number {
 	const lo = Math.max(0, from);
 	let start = findSoundStart(f, from, to);
+	const soundStart = start;
+	const earliest = Math.max(lo, soundStart - msToFrame(maxBackMs));
 
 	if (frication) {
 		// /s/ and /sh/ can be 20 dB down on the vowel and still be unmistakable,
 		// because almost all of what little energy they have sits above 4 kHz.
 		// A ratio test catches that where an absolute level never would — and on
 		// a tightly cropped recording there is no quiet high band to compare to.
+		//
+		// The hiss is scanned *backwards* from the sound start, and only as far
+		// as it stays continuous: the consonant runs straight into its vowel,
+		// whereas a breath or a lip smack in the lead-in is separated from it by
+		// room tone. Scanning forward from the start of the file would take the
+		// first such noise as the consonant.
 		const level = f.peakDb - FRICATION_UNDER_PEAK_DB;
-		const absolute = f.highFloorDb + 8;
-		for (let t = lo; t < start; t++) {
+		const absolute = leadInFloor(f.highDb, lo, soundStart, f.highFloorDb) + 8;
+		const maxGap = msToFrame(16);
+		let gap = 0;
+		let t = start;
+		while (t > earliest) {
 			const byRatio =
-				f.highRatio[t] >= FRICATION_HIGH_RATIO && f.smoothDb[t] >= level;
-			if (byRatio || f.highDb[t] >= absolute) {
-				start = t;
+				f.highRatio[t - 1] >= FRICATION_HIGH_RATIO &&
+				f.smoothDb[t - 1] >= level;
+			if (byRatio || f.highDb[t - 1] >= absolute) {
+				gap = 0;
+				start = t - 1;
+			} else if (++gap > maxGap) {
 				break;
 			}
+			t--;
 		}
 	}
 
@@ -246,16 +262,41 @@ export function findConsonantStart(
 	// ramp in over tens of milliseconds without ever being loud or sibilant, and
 	// a ramp is the one thing that distinguishes them from room tone, which is
 	// flat. Stop where the curve levels off, or where it reaches the floor.
-	const foot = f.quietDb + 6;
+	//
+	// The floor is measured from the silence that actually precedes this attack,
+	// not from the quietest window in the file: recorders fade the first few tens
+	// of milliseconds in from digital zero, and a floor taken there sits so far
+	// below the room tone that nothing ever reaches it — the walk then runs
+	// through the whole lead-in, breath and all, to the start of the file. The
+	// walk is capped as well, since no onset ramps in for longer than the
+	// consonant it belongs to.
+	const foot = leadInFloor(f.smoothDb, lo, soundStart, f.quietDb) + 6;
 	const k = Math.max(1, msToFrame(6));
-	while (start > lo) {
+	while (start > earliest) {
 		const back = Math.max(lo, start - k);
 		const stillFalling =
 			f.smoothDb[start] - f.smoothDb[back] >= ATTACK_SLOPE_DB;
-		if (!stillFalling && f.smoothDb[start - 1] <= foot) break;
+		if (!stillFalling || f.smoothDb[start - 1] <= foot) break;
 		start--;
 	}
 	return start;
+}
+
+/**
+ * Level of the room tone directly ahead of an attack: the median of `track`
+ * over `[from, to)`. Falls back to `fallback` (the file-wide quiet floor) when
+ * there is not enough lead-in to measure — a tightly cropped 単独音, say.
+ */
+function leadInFloor(
+	track: Float32Array,
+	from: number,
+	to: number,
+	fallback: number,
+): number {
+	const need = msToFrame(60);
+	if (to - from < need) return fallback;
+	const sorted = Float32Array.from(track.subarray(from, to)).sort();
+	return sorted[sorted.length >> 1];
 }
 
 /**
@@ -265,8 +306,12 @@ export function findConsonantStart(
 export function findVoiceOnset(f: Frames, from: number, to: number): number {
 	const need = Math.ceil(VOICED_RUN_MS / HOP_MS);
 	const hi = Math.min(f.n, to);
+	// A vowel is never quiet. The breath of /h/ and the murmur of a voiced
+	// fricative can flicker periodic for a few frames 40 dB below the note, and
+	// without a level gate that flicker would be taken as the vowel.
+	const th = soundThreshold(f);
 	for (let t = Math.max(0, from); t < hi; t++) {
-		if (f.voiced[t] < VOICED_THRESHOLD) continue;
+		if (f.voiced[t] < VOICED_THRESHOLD || f.smoothDb[t] < th) continue;
 		let run = 0;
 		while (t + run < hi && f.voiced[t + run] >= VOICED_THRESHOLD) run++;
 		if (run >= need) return t;
@@ -402,19 +447,32 @@ export function locateMora(
 	to: number,
 ): MoraPosition {
 	const art = ARTICULATION[cls];
-	const consStart = findConsonantStart(f, from, to, art.fricationOnset);
+	const consStart = findConsonantStart(
+		f,
+		from,
+		to,
+		art.fricationOnset,
+		art.maxConsonantMs + 60,
+	);
 	const searchEnd = Math.min(
 		to,
 		consStart + msToFrame(art.maxConsonantMs + 60),
 	);
+	// The vowel should start within the consonant's own span; when it does not,
+	// the voicing that begins anywhere before `to` is still a far better anchor
+	// than a fixed distance from an attack that may itself have been misjudged.
+	const voiceOnset = (): number => {
+		const near = findVoiceOnset(f, consStart, searchEnd);
+		return near >= 0 ? near : findVoiceOnset(f, searchEnd, to);
+	};
 
 	let vowelOnset: number;
 	if (!art.voicedConsonant) {
 		// Voiceless consonant: the vowel is exactly where the folds start.
-		const v = findVoiceOnset(f, consStart, searchEnd);
+		const v = voiceOnset();
 		vowelOnset = v >= 0 ? v : consStart + msToFrame(30);
 	} else if (cls === "vowel" || cls === "nasalN") {
-		const v = findVoiceOnset(f, consStart, searchEnd);
+		const v = voiceOnset();
 		vowelOnset = v >= 0 ? v : consStart;
 	} else {
 		const voiceStart = findVoiceOnset(f, consStart, searchEnd);
@@ -445,6 +503,19 @@ function round(ms: number): number {
 }
 
 /**
+ * Offset for a mora that has silence in front of it: a little air before the
+ * attack, but never so much that the consonant runs longer than its class
+ * allows.
+ */
+function attackOffsetMs(cls: ConsonantClass, pos: MoraPosition): number {
+	const art = ARTICULATION[cls];
+	const vowelMs = frameTimeMs(pos.vowelOnset);
+	let offsetMs = frameTimeMs(pos.consStart) - art.leadInMs;
+	offsetMs = Math.max(offsetMs, vowelMs - art.maxConsonantMs);
+	return clamp(offsetMs, 0, Math.max(0, vowelMs - 1));
+}
+
+/**
  * Turn frame positions into the five oto.ini numbers.
  *
  * `endFrame` is where the usable region stops; 右ブランク is always written in
@@ -461,13 +532,8 @@ function buildEntry(
 ): OtoEntry {
 	const art = ARTICULATION[cls];
 
-	// Offset: leave a little air before the attack, but never let the consonant
-	// run longer than the class allows.
-	let offsetMs = frameTimeMs(pos.consStart) - art.leadInMs;
+	const offsetMs = attackOffsetMs(cls, pos);
 	const vowelMs = frameTimeMs(pos.vowelOnset);
-	offsetMs = Math.max(offsetMs, vowelMs - art.maxConsonantMs);
-	offsetMs = clamp(offsetMs, 0, Math.max(0, vowelMs - 1));
-
 	const pre = Math.max(1, vowelMs - offsetMs);
 
 	let overlap: number;
@@ -869,17 +935,22 @@ export function estimateSequence(
 				? grid.onsets[i + 1]
 				: findSoundEnd(f, onset, f.n);
 
-		let vowelFrame: number;
+		let noteMs: number;
+		let offsetMs: number;
 		if (i === 0) {
 			// The phrase head is the one mora with real silence in front of it, so
-			// it can be measured the same way a 単独音 file is.
-			vowelFrame = locateMora(f, syl.cls, 0, next).vowelOnset;
+			// it is measured the same way a 単独音 file is — and its offset goes
+			// just ahead of the attack rather than half an interval back. Half an
+			// interval reaches into the breath the singer took before the phrase,
+			// which then plays as the note.
+			const pos = locateMora(f, syl.cls, 0, next);
+			noteMs = frameTimeMs(pos.vowelOnset);
+			offsetMs = attackOffsetMs(syl.cls, pos);
 		} else {
-			vowelFrame = sequenceVowelOnset(f, syl.cls, onset, next);
+			noteMs = frameTimeMs(sequenceVowelOnset(f, syl.cls, onset, next));
+			offsetMs = clamp(noteMs - pre, 0, Math.max(0, noteMs - 1));
 		}
 
-		const noteMs = frameTimeMs(vowelFrame);
-		const offsetMs = clamp(noteMs - pre, 0, Math.max(0, noteMs - 1));
 		const actualPre = noteMs - offsetMs;
 		// 右ブランク reaches two thirds of an interval past the note, so each mora's
 		// tail is still there for the next one to cross-fade into.

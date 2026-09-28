@@ -525,6 +525,45 @@ func equivalentKanaForms(mora string) []string {
 	return nil
 }
 
+// devoicedKana は濁音・半濁音の頭の1字を清音にする（が → か、ぱ → は、ぎゃ → きゃ）。
+var devoicedKana = map[rune]rune{
+	'が': 'か', 'ぎ': 'き', 'ぐ': 'く', 'げ': 'け', 'ご': 'こ',
+	'ざ': 'さ', 'じ': 'し', 'ず': 'す', 'ぜ': 'せ', 'ぞ': 'そ',
+	'だ': 'た', 'ぢ': 'ち', 'づ': 'つ', 'で': 'て', 'ど': 'と',
+	'ば': 'は', 'び': 'ひ', 'ぶ': 'ふ', 'べ': 'へ', 'ぼ': 'ほ',
+	'ぱ': 'は', 'ぴ': 'ひ', 'ぷ': 'ふ', 'ぺ': 'へ', 'ぽ': 'ほ',
+}
+
+// devoicedKanaFormは、濁音・半濁音の録音がない音源（清音だけの単独音源など）で
+// 1モーラ欠けて文全体の合成が止まらないよう、最後の手段として使う清音を返す。
+// 濁りは失われるので、同音候補（equivalentKanaForms）よりさらに後ろに置く。
+// 濁音・半濁音でないモーラは空文字。
+func devoicedKanaForm(mora string) string {
+	runes := []rune(mora)
+	if len(runes) == 0 {
+		return ""
+	}
+	plain, ok := devoicedKana[runes[0]]
+	if !ok {
+		return ""
+	}
+	runes[0] = plain
+	return string(runes)
+}
+
+// approximateKana は外来音などの拗音を、母音を保った直音で近似する（ふぇ → へ、てぃ → て）。
+// 清音だけの単独音源（五十音と や行の 拗音しか 無い 音源）の救済用。
+var approximateKana = map[string]string{
+	"ふぁ": "は", "ふぃ": "ひ", "ふぇ": "へ", "ふぉ": "ほ", "ふゅ": "ひゅ",
+	"うぃ": "い", "うぇ": "え", "うぉ": "お", "いぇ": "え",
+	"てぃ": "て", "でぃ": "で", "とぅ": "と", "どぅ": "ど", "てゅ": "ちゅ", "でゅ": "じゅ",
+	"しぇ": "せ", "じぇ": "ぜ", "ちぇ": "て",
+	"つぁ": "た", "つぃ": "ち", "つぇ": "て", "つぉ": "と",
+	"ゔぁ": "ば", "ゔぃ": "び", "ゔ": "ぶ", "ゔぇ": "べ", "ゔぉ": "ぼ",
+	"くぁ": "か", "ぐぁ": "が",
+	"きぇ": "け", "ぎぇ": "げ", "にぇ": "ね", "ひぇ": "へ", "びぇ": "べ", "ぴぇ": "ぺ", "みぇ": "め", "りぇ": "れ",
+}
+
 // aliasFormはモーラに対して試す表記。fallbackは同音候補への追加ペナルティ。
 type aliasForm struct {
 	text       string
@@ -551,6 +590,19 @@ func aliasCandidatesAfterContext(mora, previousVowel, closureVowel string, phras
 	base := []aliasForm{{text: mora}}
 	for _, equivalent := range equivalentKanaForms(mora) {
 		base = append(base, aliasForm{text: equivalent, fallback: 1, equivalent: true})
+	}
+	// 録音がなければ、濁音は清音で（fallback 2）、外来音などの拗音は近い直音で（fallback 3。
+	// それも濁音なら清音まで）代用する。元の表記・同音候補のどれかがあればそちらだけを使う。
+	for _, form := range append([]aliasForm(nil), base...) {
+		if plain := devoicedKanaForm(form.text); plain != "" {
+			base = append(base, aliasForm{text: plain, fallback: 2, equivalent: true})
+		}
+		if near := approximateKana[form.text]; near != "" {
+			base = append(base, aliasForm{text: near, fallback: 3, equivalent: true})
+			if plain := devoicedKanaForm(near); plain != "" {
+				base = append(base, aliasForm{text: plain, fallback: 4, equivalent: true})
+			}
+		}
 	}
 	for _, form := range base {
 		forms = append(forms, form)

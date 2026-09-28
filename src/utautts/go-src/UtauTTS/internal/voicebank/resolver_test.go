@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math"
 	"path/filepath"
+	"slices"
 	"testing"
 
 	"utautts/internal/audio"
@@ -378,6 +379,63 @@ func TestResolvePrefersOriginalKanaWhenBothRecordingsExist(t *testing.T) {
 	}
 	if fallback[1].FallbackTier != 1 {
 		t.Fatalf("fallback tier = %d, want 1 for the equivalent alias: %#v", fallback[1].FallbackTier, fallback[1])
+	}
+}
+
+func TestResolveFallsBackToPlainKanaWithoutVoicedRecordings(t *testing.T) {
+	morae, err := frontend.ParseKana("でぎゃぱ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 清音だけの単独音源（革命シヨ など）。
+	plainOnly := &Bank{Entries: map[string][]oto.Entry{
+		"て":  {{Alias: "て", Filename: "te.wav"}},
+		"きゃ": {{Alias: "きゃ", Filename: "kya.wav"}},
+		"は":  {{Alias: "は", Filename: "ha.wav"}},
+	}}
+	got, err := plainOnly.Resolve(morae)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, want := range []string{"て", "きゃ", "は"} {
+		if got[index].Alias != want {
+			t.Fatalf("selection %d alias = %q, want the plain fallback %q", index, got[index].Alias, want)
+		}
+		if got[index].FallbackTier < 2 {
+			t.Fatalf("selection %d fallback tier = %d, want the devoiced penalty", index, got[index].FallbackTier)
+		}
+	}
+
+	// 濁音の録音があれば清音は使わない。
+	plainOnly.Entries["で"] = []oto.Entry{{Alias: "で", Filename: "de.wav"}}
+	voiced, err := plainOnly.Resolve(morae)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if voiced[0].Alias != "で" {
+		t.Fatalf("alias = %q, want the dedicated で recording", voiced[0].Alias)
+	}
+
+	// 外来音は近い直音で（ふぇ → へ、でぃ → で → て）。
+	approx, err := frontend.ParseKana("ふぇでぃ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plainOnly.Entries["へ"] = []oto.Entry{{Alias: "へ", Filename: "he.wav"}}
+	delete(plainOnly.Entries, "で")
+	near, err := plainOnly.Resolve(approx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if near[0].Alias != "へ" || near[1].Alias != "て" {
+		t.Fatalf("aliases = %q %q, want へ て", near[0].Alias, near[1].Alias)
+	}
+
+	// ぢ は同音の じ を先に、どちらも無ければ し を使う。
+	names := candidateNames(aliasCandidatesWithPolicy("ぢ", "", true, AliasPolicyAuto))
+	has := func(name string) bool { return slices.Contains(names, name) }
+	if !has("じ") || !has("し") || !has("ち") {
+		t.Fatalf("ぢ candidates = %v, want じ then し/ち", names)
 	}
 }
 

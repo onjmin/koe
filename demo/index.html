@@ -462,8 +462,7 @@
 
   <script type="module">
     import {
-      parseOto, normalizePcm, trimToOto,
-      parseFrqAverageF0, frqFileName, pitchFromAliasSuffix,
+      convertVoicebank,
       packKoe, KoeEngine, Worldline, leadInFromEntry,
       unzipToFileMap, zipFiles,
       prepareOtoFile, estimateOtoFile, finishOto, suffixFromFolderName, encodeOto,
@@ -783,57 +782,21 @@
         const firstPath = Object.keys(fileMap)[0] || '';
         topDir = firstPath.includes('/') ? firstPath.split('/')[0] : zipFile.name.replace(/\.zip$/i, '');
       } else {
-        for (const f of voiceFiles.files) fileMap[f.webkitRelativePath.replace(/\\/g, '/')] = f;
+        // NFC: banks made on macOS name files with a split dakuten (NFD); oto.ini uses NFC.
+        for (const f of voiceFiles.files) fileMap[f.webkitRelativePath.normalize('NFC').replace(/\\/g, '/')] = f;
         topDir = (voiceFiles.files[0]?.webkitRelativePath.split('/')[0]) || 'voice';
       }
 
-      const otoFiles = Object.entries(fileMap).filter(([p]) => /(^|\/)oto\.ini$/i.test(p));
-      if (!otoFiles.length) throw new Error('oto.ini が見つかりません（フォルダごと選択してください）');
-
-      // Pass 1: collect every entry so the total — and the progress bar — is fixed.
-      const allEntries = [];
-      for (const [otoPath, otoFile] of otoFiles) {
-        const otoDir = otoPath.includes('/') ? otoPath.slice(0, otoPath.lastIndexOf('/') + 1) : '';
-        const content = new TextDecoder('shift_jis').decode(await otoFile.arrayBuffer());
-        for (const oto of parseOto(content)) allEntries.push({ oto, otoDir });
-      }
-      const total = allEntries.length;
-      appendLog(convertLog, `${otoFiles.length} oto.ini / ${total} エントリ`);
-
-      // Pass 2: process with a monotonic counter (x of y).
-      const phonemes = {};
-      const blobParts = [];
-      let byteOffset = 0, count = 0, skipped = 0, processed = 0;
-
-      for (const { oto, otoDir } of allEntries) {
-        processed++;
-        setProgress(convertProgress, processed / total);
-
-        const wavFile = fileMap[otoDir + oto.wav];
-        if (!wavFile) { skipped++; continue; }
-        try {
-          const pcm = normalizePcm(await wavFile.arrayBuffer());
-
-          // recorded pitch: frq average → alias suffix → autocorrelation (in trimToOto)
-          let recordedPitch = pitchFromAliasSuffix(oto.alias) ?? 0;
-          const frqFile = fileMap[otoDir + frqFileName(oto.wav)];
-          if (frqFile) { const avg = parseFrqAverageF0(await frqFile.arrayBuffer()); if (avg) recordedPitch = avg; }
-
-          const { pcm: slice, entry } = trimToOto(pcm, oto, recordedPitch);
-          if (slice.length === 0) { skipped++; continue; }
-          phonemes[oto.alias] = { offset: byteOffset, ...entry };
-          byteOffset += slice.byteLength;
-          blobParts.push(slice.slice());
-          count++;
-        } catch (e) {
-          skipped++;
-          appendLog(convertLog, `[skip] ${oto.alias}: ${e.message}`);
-        }
-      }
-
-      if (!count) throw new Error('変換できる音素がありません');
-      const manifest = { sampleRate: 48000, referencePitch: 220, phonemes };
-      return { koe: packKoe(manifest, blobParts), name: topDir, count, skipped };
+      // The CLI (koe-convert) runs the same convertVoicebank, so both give the same .koe.
+      const result = await convertVoicebank(Object.entries(fileMap), {
+        onProgress: (done, total) => setProgress(convertProgress, done / total),
+        onSkip: (oto, reason) => appendLog(convertLog, `[skip] ${oto.alias}: ${reason}`),
+      });
+      if (!result.otoFiles) throw new Error('oto.ini が見つかりません（フォルダごと選択してください）');
+      appendLog(convertLog, `${result.otoFiles} oto.ini / ${result.count + result.skipped} エントリ`);
+      if (!result.count) throw new Error('変換できる音素がありません');
+      const { count, skipped } = result;
+      return { koe: packKoe(result.manifest, [result.bin]), name: topDir, count, skipped };
     }
 
     // ════════ Load an existing .koe ════════

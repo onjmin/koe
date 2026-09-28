@@ -1,5 +1,12 @@
 // Engine (browser)
 
+// Converter utilities (browser + Node.js)
+export type {
+	ConvertOptions,
+	ConvertResult,
+	VoiceFile,
+} from "./converter/convert.js";
+export { convertVoicebank, decodeOto } from "./converter/convert.js";
 export type { FrqData } from "./converter/frq.js";
 export {
 	frqAverageF0InRange,
@@ -14,8 +21,7 @@ export type {
 } from "./converter/pack.js";
 export { otoRegion, pack, trimToOto } from "./converter/pack.js";
 export type { OtoEntry } from "./converter/parse-oto.js";
-// Converter utilities (browser + Node.js)
-export { parseOto } from "./converter/parse-oto.js";
+export { fileKey, parseOto } from "./converter/parse-oto.js";
 export {
 	detectF0,
 	noteNameToHz,
@@ -75,11 +81,11 @@ export type {
 	WavInput,
 } from "./oto/generate.js";
 export {
+	estimateOtoFile,
+	finishOto,
 	generateOto,
 	generateOtoForFile,
 	prepareOtoFile,
-	estimateOtoFile,
-	finishOto,
 	suffixFromFolderName,
 	summarise,
 	transcribe,

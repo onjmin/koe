@@ -18,11 +18,16 @@ export interface OtoEntry {
 /**
  * Parse oto.ini content (already decoded to UTF-8 string).
  * Silently skips malformed lines.
+ *
+ * Aliases and filenames are normalised to NFC, so `が` written as `か` + U+3099
+ * is the same alias the synthesiser looks up. Match the WAV with
+ * {@link fileKey} on the file side too: banks unpacked from a macOS zip keep
+ * NFD names on disk while oto.ini spells them in NFC.
  */
 export function parseOto(content: string): OtoEntry[] {
 	const entries: OtoEntry[] = [];
 
-	for (const raw of content.split(/\r?\n/)) {
+	for (const raw of content.normalize("NFC").split(/\r?\n/)) {
 		const line = raw.trim();
 		if (!line || line.startsWith("#")) continue;
 
@@ -52,4 +57,12 @@ export function parseOto(content: string): OtoEntry[] {
 	}
 
 	return entries;
+}
+
+/**
+ * Key for matching an oto.ini filename against files on disk or in a zip:
+ * NFC with forward slashes. Normalise both sides with this.
+ */
+export function fileKey(path: string): string {
+	return path.normalize("NFC").replace(/\\/g, "/");
 }

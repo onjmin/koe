@@ -28,7 +28,8 @@ export function unzipToFileMap(
 		const name = isUtf8ByIndex[i]
 			? rawName
 			: sjisDecoder.decode(Uint8Array.from(rawName, (c) => c.charCodeAt(0)));
-		const path = name.replace(/\\/g, "/");
+		// NFC: zips made on macOS store names with a split dakuten (NFD).
+		const path = name.normalize("NFC").replace(/\\/g, "/");
 		if (path.endsWith("/")) return; // directory entry
 		fileMap[path] = {
 			arrayBuffer: () =>
